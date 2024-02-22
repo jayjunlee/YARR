@@ -24,6 +24,7 @@ from rvt.utils.peract_utils import CAMERAS
 
 import os
 import csv
+from collections import Counter
 from PIL import Image
 import logging
 logging.getLogger('PIL').setLevel(logging.WARNING)
@@ -44,6 +45,7 @@ class RolloutGenerator(object):
                   eval: bool, log_dir, task_name, episode_number, eval_demo_seed: int = 0,
                   record_enabled: bool = False,
                   replay_ground_truth: bool = False,
+                  interactive: bool = False
                   ):
         # 1. reset
         # 2. initial obs
@@ -73,7 +75,9 @@ class RolloutGenerator(object):
             for cam in CAMERAS:
                 rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
                 rgb = Image.fromarray(rgb.T).rotate(-90)
-                rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{0}.png"))
+                rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{step}.png"))
+                if interactive:
+                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
 
             # TODO_JJL but what is ActResult?
             # here before we step through the base policy's action,
@@ -97,39 +101,45 @@ class RolloutGenerator(object):
             # - pull  = increase x
             # - push  = decrease x
 
-            print("Predicted action:", np.round(act_result.action, 3))
-            take_control = input("T or F: ")
+            print(f"Step {step} | pred action:", np.round(act_result.action, 3))
             
-            if take_control == "T":
-                # option 1: just generate a new waypoint
-                if False:
-                    user_action_str = input("Enter proposed action:")
-                    user_action = np.array([float(item) for item in user_action_str.split(',')])
-                    act_result.action[0:3] = user_action[0:3]
-                # option 2: add delta action to current waypoint
-                if True:
-                    act_result.action = prev_act
-                    key = input('Move:')
-                    if key == 'w':
-                        act_result.action[0] -= 0.01
-                    if key == 's':
-                        act_result.action[0] += 0.01
-                    if key == 'd':
-                        act_result.action[1] -= 0.01
-                    if key == 'dd':
-                        act_result.action[1] -= 0.1
-                    if key == 'a':
-                        act_result.action[1] += 0.01
-                    if key == 'aa':
-                        act_result.action[1] += 0.1
-                    if key == 'q':
-                        act_result.action[2] += 0.01
-                    if key == 'e':
-                        act_result.action[2] -= 0.01
+            if interactive:
+                take_control = input("T or F: ") # early failure prediction here
+                if take_control == "T":
+                    # option 1: just generate a new waypoint
+                    if False:
+                        user_action_str = input("Enter proposed action:")
+                        user_action = np.array([float(item) for item in user_action_str.split(',')])
+                        act_result.action[0:3] = user_action[0:3]
+                    # option 2: add delta action to current waypoint
+                    if True:
+                        act_result.action = prev_act
+                        key = input('Move:')
+                        key_count = Counter(key)
+
+                        if key_count['w']:
+                            act_result.action[0] -= 0.01 * key_count['w']
+                        if key_count['s']:
+                            act_result.action[0] += 0.01 * key_count['s']
+                        if key_count['d']:
+                            act_result.action[1] -= 0.01 * key_count['d']
+                        if key_count['a']:
+                            act_result.action[1] += 0.01 * key_count['a']
+                        if key_count['q']:
+                            act_result.action[2] += 0.01 * key_count['q']
+                        if key_count['e']:
+                            act_result.action[2] -= 0.01 * key_count['e']
+                        if key == 'g':
+                            # idx = 7: grasping. if == 0, close. if == 1, open
+                            if act_result.action[7]:
+                                act_result.action[7] = 0
+                            else:
+                                act_result.action[7] = 1
+
+                        prev_act = act_result.action
+                else:
                     prev_act = act_result.action
-            else:
-                prev_act = act_result.action
-            print(act_result.action)
+                print(np.round(act_result.action, 3))
 
 
             # Convert to np if not already
