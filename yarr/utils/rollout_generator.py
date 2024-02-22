@@ -61,6 +61,7 @@ class RolloutGenerator(object):
         obs_history = {k: [np.array(v, dtype=self._get_type(v))] * timesteps for k, v in obs.items()}
         count = 0
         prev_act = np.zeros((9,))
+        user_has_control = False
         for step in range(episode_length):
             # 3. take action
             prepped_data = {k:torch.tensor(np.array([v]), device=self._env_device) for k, v in obs_history.items()}
@@ -79,17 +80,6 @@ class RolloutGenerator(object):
                 if interactive:
                     rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
 
-            # TODO_JJL but what is ActResult?
-            # here before we step through the base policy's action,
-            # we prompt GPT-4V using images maybe from "obs" variable
-            # e.g.
-            # if not failure:
-            #   transition = env.step(act_result)
-            # else:
-            #   transition = env.step(corrected_act_GPT4V) in the form of ActResult
-
-            # 0.25 +/- 0.65/2, 0 +/- 0.91/2
-
             # in the front view
             # - x range = [-0.075, 0.575] m
             # - y range = [-0.455, 0.455] m
@@ -102,10 +92,15 @@ class RolloutGenerator(object):
             # - push  = decrease x
 
             print(f"Step {step} | pred action:", np.round(act_result.action, 3))
-            
+
+
             if interactive:
-                take_control = input("T or F: ") # early failure prediction here
-                if take_control == "T":
+                if not user_has_control:
+                    take_control = input("T or F: ")  # early failure prediction here
+                    if take_control == "T":
+                        user_has_control = True
+
+                if user_has_control:
                     # option 1: just generate a new waypoint
                     if False:
                         user_action_str = input("Enter proposed action:")
@@ -136,10 +131,14 @@ class RolloutGenerator(object):
                             else:
                                 act_result.action[7] = 1
 
+                        if key == 'r':  # 'r' key to release control
+                            user_has_control = False
+
                         prev_act = act_result.action
                 else:
                     prev_act = act_result.action
                 print(np.round(act_result.action, 3))
+
 
 
             # Convert to np if not already
@@ -148,24 +147,7 @@ class RolloutGenerator(object):
             extra_replay_elements = {k: np.array(v) for k, v in
                                      act_result.replay_elements.items()}
 
-            # PROBING VARIABLES
-            # logging.debug(f"Observation variable: {obs}")
-            # logging.debug(f"Observation keys: {obs.keys()}")
-
-
-
             # (9,) = (7,) EE pose + (1,) Gripper if zero close if 1 open + (1,) Ignore collision
-            # action = act_result.action
-            # if step == 0:
-            #     open(os.path.join(multiview_img_folder, "actions.csv"), 'w').close() # delete all content first
-            #     open(os.path.join(multiview_img_folder, "lang.csv"), 'w').close()
-            #     with open(os.path.join(multiview_img_folder, "lang.csv"), 'a', newline='') as csvfile:
-            #         csvfile.write(env._lang_goal)
-
-            # with open(os.path.join(multiview_img_folder, "actions.csv"), 'a', newline='') as csvfile:
-            #     writer = csv.writer(csvfile)
-            #     writer.writerow(np.round(action,4))
-            # logging.debug(f"action at step {step}: {action}")
 
             # 4. step through environment; 
             transition = env.step(act_result)
