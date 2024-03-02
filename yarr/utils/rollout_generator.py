@@ -21,8 +21,11 @@ from yarr.utils.transition import ReplayTransition
 from yarr.agents.agent import ActResult
 
 from rvt.utils.peract_utils import CAMERAS
+from rvt.libs.peract.helpers.demo_loading_utils import keypoint_discovery
+from waypoint_extraction.extract_waypoints import dp_waypoint_selection
 
 import os
+import shutil
 import csv
 from collections import Counter
 from PIL import Image
@@ -53,7 +56,7 @@ class RolloutGenerator(object):
             obs = env.reset_to_demo(eval_demo_seed) # this is using the same initial config of a test data
             # get ground-truth action sequence
             if replay_ground_truth:
-                actions = env.get_ground_truth_action(eval_demo_seed)
+                actions, keypoints = env.get_ground_truth_action(eval_demo_seed, 'awe') # 'heuristic' or 'awe'
         else:
             obs = env.reset()
         agent.reset()
@@ -63,6 +66,21 @@ class RolloutGenerator(object):
         prev_act = np.zeros((9,))
         user_has_control = False
         for step in range(episode_length):
+            multiview_img_folder = os.path.join(log_dir, task_name, str(episode_number), "multiview")
+            for cam in CAMERAS:
+                rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
+                rgb = Image.fromarray(rgb.T).rotate(-90)
+                if not replay_ground_truth:
+                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{step}.png"))
+                else:
+                    if step == 0:
+                        rgb.save(os.path.join(multiview_img_folder, f"{cam}", "0.png"))
+                    else:
+                        # image name indicates that that waypoint idx has been achieved and shown
+                        rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{keypoints[step - 1]}.png"))
+                # if interactive:
+                rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
+
             # 3. take action
             prepped_data = {k:torch.tensor(np.array([v]), device=self._env_device) for k, v in obs_history.items()}
             if not replay_ground_truth:
@@ -71,14 +89,6 @@ class RolloutGenerator(object):
                 if step >= len(actions):
                     return
                 act_result = ActResult(actions[step])
-
-            multiview_img_folder = os.path.join(log_dir, task_name, str(episode_number), "multiview")
-            for cam in CAMERAS:
-                rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
-                rgb = Image.fromarray(rgb.T).rotate(-90)
-                rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{step}.png"))
-                if interactive:
-                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
 
             # in the front view
             # - x range = [-0.075, 0.575] m
@@ -91,7 +101,7 @@ class RolloutGenerator(object):
             # - pull  = increase x
             # - push  = decrease x
 
-            print(f"Step {step} | pred action:", np.round(act_result.action, 3))
+            print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step]})")
 
 
             if interactive:
@@ -142,10 +152,8 @@ class RolloutGenerator(object):
 
 
             # Convert to np if not already
-            agent_obs_elems = {k: np.array(v) for k, v in
-                               act_result.observation_elements.items()}
-            extra_replay_elements = {k: np.array(v) for k, v in
-                                     act_result.replay_elements.items()}
+            agent_obs_elems = {k: np.array(v) for k, v in act_result.observation_elements.items()}
+            extra_replay_elements = {k: np.array(v) for k, v in act_result.replay_elements.items()}
 
             # (9,) = (7,) EE pose + (1,) Gripper if zero close if 1 open + (1,) Ignore collision
 
@@ -182,6 +190,7 @@ class RolloutGenerator(object):
             if transition.terminal or timeout:
                 # If the agent gives us observations then we need to call act
                 # one last time (i.e. acting in the terminal state).
+                print("terminal~~")
                 if len(act_result.observation_elements) > 0:
                     prepped_data = {k: torch.tensor([v], device=self._env_device) for k, v in obs_history.items()}
                     act_result = agent.act(step_signal.value, prepped_data, deterministic=eval)
@@ -200,6 +209,4 @@ class RolloutGenerator(object):
 
             # TODO_JJL how to deal with termination or too early termination
             if transition.info.get("needs_reset", transition.terminal):
-                if count == 2:
-                    return
-                count += 1
+                return
