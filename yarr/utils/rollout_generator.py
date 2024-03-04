@@ -30,8 +30,11 @@ import csv
 from collections import Counter
 from PIL import Image
 import logging
+
 logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.DEBUG)
+np.set_printoptions(formatter={'float': '{:0.3f}'.format})
+
 
 class RolloutGenerator(object):
 
@@ -73,25 +76,23 @@ class RolloutGenerator(object):
         # waypoints: range(0,whatever)
         # dense_actions: shape (186,9)
         # keypoints: [56, 79, 101, 138, 147, 185]
-        # actions: 
-        # array([ 1.17711231e-01,  1.71137631e-01,  9.28920507e-01, -2.97863096e-01, 9.54608440e-01,  4.98470072e-05, -4.77327849e-04,  1.00000000e+00,        0.00000000e+00])
-        # array([ 1.17820233e-01,  1.71247438e-01,  7.58766115e-01, -2.98061818e-01, 9.54546452e-01, -4.02269507e-05, -4.55035712e-04,  0.00000000e+00,        1.00000000e+00])
-        # array([ 1.17517643e-01,  1.71243042e-01,  9.27575827e-01, -2.98106015e-01,        9.54532564e-01, -3.12376324e-05, -6.38707366e-04,  0.00000000e+00,        1.00000000e+00])
-        # array([ 3.06168437e-01, -2.57705301e-01,  9.27317142e-01, -3.00539017e-01,        9.53768909e-01,  7.41665310e-04, -7.54668145e-04,  0.00000000e+00,        0.00000000e+00])
-        # array([ 3.06513101e-01, -2.58281738e-01,  8.67196202e-01, -3.00613463e-01,        9.53745604e-01,  5.94818091e-04, -7.41272117e-04,  0.00000000e+00,        1.00000000e+00])
-        # array([ 3.06698292e-01, -2.58368641e-01,  8.67090642e-01,  4.57508296e-01,        8.89205217e-01, -1.29942171e-04, -5.57533582e-04,  1.00000000e+00,        1.00000000e+00])
-        
         # the perturbed idx is where failure is injected. we fallback to a previous waypoint and reapproach the same waypoint correctly
-        perturbed_idx = [1, 4] # perurb 79 = keypoints[peturbed_idx[0]]
+        perturbed_idx = list(range(len(keypoints))) # perurb 79 = keypoints[peturbed_idx[0]]
+        p = []
         p_count = 0 
         for idx in perturbed_idx:
             # inject perturbation to expert keypoint to induce failure
-            perturbed_action = actions[idx,:].copy()
-            perturbation = np.random.normal(0, 0.1, size=(2,))
+            perturbed_action = actions[p_count * 2 + idx,:].copy()
+            perturbation = np.random.normal(0, 0.05, size=(2,))
+            p.append(perturbation)
             perturbed_action[0:2] += perturbation
+            perturbed_action[2] += 0.02
 
             # randomly sample a correct waypoint from a segment of waypoints leading up to the expert keypoint
-            waypoint_segment = waypoints[keypoints[idx-1] : keypoints[idx]]
+            if idx == 0:
+                waypoint_segment = waypoints[0 : keypoints[idx]]
+            else:
+                waypoint_segment = waypoints[keypoints[idx-1] : keypoints[idx]]
             corrective_action = dense_actions[np.random.choice(waypoint_segment)]
 
             # insert perturbed action and correction action to actions
@@ -103,7 +104,6 @@ class RolloutGenerator(object):
         step = 0
         perturb_count = 0
         while True:
-
             multiview_img_folder = os.path.join(log_dir, task_name, str(episode_number), "multiview")
             for cam in CAMERAS:
                 rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
@@ -139,9 +139,7 @@ class RolloutGenerator(object):
                     return
                 act_result = ActResult(actions[step]) # selects the ith keypoint as action
             if perturb_count <= len(perturbed_idx) - 1:
-                if step == 0:
-                    print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step]})")
-                elif step == 2 * perturb_count + perturbed_idx[perturb_count]:
+                if step == 2 * perturb_count + perturbed_idx[perturb_count]:
                     print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (perturbed waypoint {keypoints[step - 2 * perturb_count]})")
                 elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
                     print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (corrected waypoint {keypoints[step - 2 * perturb_count - 1]})")
