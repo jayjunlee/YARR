@@ -26,6 +26,8 @@ from waypoint_extraction.extract_waypoints import dp_waypoint_selection
 from rvt.mvt.aug_utils import quaternion_to_discrete_euler, sensitive_gimble_fix, discrete_euler_to_quaternion, quaternion_to_euler
 from scipy.spatial.transform import Rotation
 
+from rvt.libs.RLBench.rlbench.backend.waypoints import Waypoint, Point
+
 import os
 import shutil
 import csv
@@ -37,6 +39,7 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.DEBUG)
 np.set_printoptions(formatter={'float': '{:0.3f}'.format})
 
+TASK_BOUND = [-0.075, -0.455, 0.752, 0.480, 0.455, 1.100]
 
 class RolloutGenerator(object):
 
@@ -47,6 +50,21 @@ class RolloutGenerator(object):
         if x.dtype == np.float64:
             return np.float32
         return x.dtype
+    
+    def check_within_bound(self, waypoint):
+        if (waypoint[0] > TASK_BOUND[0] and waypoint[0] < TASK_BOUND[3]) and \
+           (waypoint[1] > TASK_BOUND[1] and waypoint[1] < TASK_BOUND[4]) and \
+           (waypoint[2] > TASK_BOUND[2] and waypoint[2] < TASK_BOUND[5]):
+            return True
+        else:
+            return False
+
+    def check_correction_distance(self, perturbed, keypoint, min, max):
+        if min < np.linalg.norm(perturbed - keypoint) < max:
+            print(np.linalg.norm(perturbed - keypoint))
+            return True
+        else:
+            return False
 
     def generator(self, step_signal: Value, env: Env, agent: Agent,
                   episode_length: int, timesteps: int,
@@ -78,6 +96,7 @@ class RolloutGenerator(object):
         # perturbation injection
         # keypoints: [56, 79, 101, 138, 147, 185] (x start from 0)
         # the perturbed idx is where failure is injected. we fallback to a previous waypoint and reapproach the same waypoint correctly
+        
         # Currently checks the following:
         # 1. Perturb rotation for all roll, pitch, yaw.
         #   -> Or do we want to focus on the yaw perturbations? The yaw alignment issue was prevalent in picking up action failure modes.
@@ -90,8 +109,10 @@ class RolloutGenerator(object):
         resolution = 5
 
         # noise params
-        translation_noise = 0.1
+        translation_noise = 0.2
         rotation_noise = 45
+        min_dist_thres = 0.02
+        max_dist_thres = 0.05
 
         if replay_ground_truth & perturb:
             perturbed_idx = list(range(len(keypoints))) # perurb 79 = keypoints[peturbed_idx[0]]
@@ -110,62 +131,80 @@ class RolloutGenerator(object):
                         break
 
                 # 1. 
-                euler = quaternion_to_euler(perturbed_action[3:7], resolution).astype(np.float64)
-                rot_perturbation = np.random.normal(0, rotation_noise, size=(1,))
-                euler[2] += rot_perturbation # only yaw
-                disc = Rotation.from_euler("xyz", euler, degrees=True).as_quat()
-                perturbed_action[3:7] = disc
+                # euler = quaternion_to_euler(perturbed_action[3:7], resolution).astype(np.float64)
+                # rot_perturbation = np.random.normal(0, rotation_noise, size=(1,))
+                # euler[2] += rot_perturbation # only yaw
+                # disc = Rotation.from_euler("xyz", euler, degrees=True).as_quat()
+                # perturbed_action[3:7] = disc
 
                 # 2.
                 gripper_toggle = np.random.choice([0, 1], p=[0.9, 0.1])
+                print(f"Toggle gripper: {bool(gripper_toggle)}")
                 if gripper_toggle:
                     if perturbed_action[8]:
                         perturbed_action[8] = 0.0
                     else:
                         perturbed_action[8] = 1.0
                 
-                # TODO Write function that checks for IK bound given x y z.
-
                 # 3.
-                # translation_perturbation_mode = np.random.choice([0, 1, 2])
-                # # for debugging; comment out when running data aug
-                # translation_perturbation_mode = 2
-                # if translation_perturbation_mode == 0:
-                #     # perturb only x and y
-                #     xy_perturbation = np.random.normal(0, 0.05, size=(2,))
-                #     perturbed_action[0:2] += xy_perturbation
-                # elif translation_perturbation_mode == 1:
-                #     # perturb only z
-                #     z_perturbation = -1
-                #     while z_perturbation <= 0:
-                #         z_perturbation = np.random.normal(0, 0.1)
-                #     perturbed_action[2] += z_perturbation
-                # else:
-                #     # perturb x, y, and z by small amount
-                #     xy_perturbation = np.random.normal(0, 0.01, size=(2,))
-                #     perturbed_action[0:2] += xy_perturbation
-                #     z_perturbation = -1
-                #     while z_perturbation <= 0:
-                #         z_perturbation = np.random.normal(0, 0.01)
-                #     perturbed_action[2] += z_perturbation
+                perturbed_action_ckpt = perturbed_action[0:3].copy()
+
+                
+                translation_perturbation_mode = np.random.choice([0, 1])
+                while True:
+                    # print(f"Translation perturbation mode: {translation_perturbation_mode}")
+                    perturbed_action[0:3] = perturbed_action_ckpt  # reset
+                    # for debugging; comment out when running data aug
+                    translation_perturbation_mode = 2
+                    if translation_perturbation_mode == 0:
+                        # perturb only x and y
+                        xy_perturbation = np.random.normal(0, translation_noise, size=(2,))
+                        perturbed_action[0:2] += xy_perturbation
+                    # elif translation_perturbation_mode == 1:
+                    #     # perturb only z
+                    #     z_perturbation = -1
+                    #     while z_perturbation <= 0:
+                    #         z_perturbation = np.random.normal(0, translation_noise)
+                    #     perturbed_action[2] += z_perturbation
+                    else:
+                        # perturb all x, y, and z
+                        xy_perturbation = np.random.normal(0, translation_noise, size=(2,))
+                        perturbed_action[0:2] += xy_perturbation
+                        z_perturbation = -1
+                        while z_perturbation <= 0:
+                            z_perturbation = np.random.normal(0, translation_noise)
+                        perturbed_action[2] += z_perturbation
+                    # print(np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]))
+                    if self.check_within_bound(perturbed_action[0:3]):
+                        print(np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]))
+                        if 0.02 < np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]) < 0.05:
+                            break
 
 
                 # Sampling corrective behavior
                 # randomly sample a correct waypoint from a segment of waypoints leading up to the expert keypoint
                 if idx == 0:
-                    half = keypoints[idx] // 2
-                    waypoint_segment = waypoints[0 + half : keypoints[idx]]
+                    half = keypoints[idx] // 4
+                    half = 0
+                    waypoint_segment = waypoints[0 + half : keypoints[idx] - half]
                 else:
-                    half = (keypoints[idx] - keypoints[idx-1]) // 2
-                    waypoint_segment = waypoints[keypoints[idx-1] + half : keypoints[idx]]
-                random_idx = np.random.choice(waypoint_segment)
+                    half = (keypoints[idx] - keypoints[idx-1]) // 4
+                    half = 0
+                    waypoint_segment = waypoints[keypoints[idx-1] + half : keypoints[idx] - half]
+                while True:
+                    random_idx = np.random.choice(waypoint_segment)
+                    if self.check_correction_distance(dense_actions[random_idx][0:3], actions[idx + p_count * 2,:][0:3], min_dist_thres, max_dist_thres):
+                        # print(random_idx)
+                        break
+                # random_idx = np.random.choice(waypoint_segment)
+                # print(random_idx)
                 corrective_idx.append(random_idx)
                 corrective_action = dense_actions[random_idx]
 
                 # insert perturbed action and correction action to actions
                 actions = np.insert(actions, p_count * 2 + idx, np.vstack([perturbed_action, corrective_action]), axis=0)
                 p_count += 1
-            print(np.round(actions,3))
+            # print(np.round(actions,3))
 
         # 3. stepping
         step = 0
@@ -278,7 +317,7 @@ class RolloutGenerator(object):
             agent_obs_elems = {k: np.array(v) for k, v in act_result.observation_elements.items()}
             extra_replay_elements = {k: np.array(v) for k, v in act_result.replay_elements.items()}
 
-            
+
 
             # 4. step through environment; 
             transition = env.step(act_result)
