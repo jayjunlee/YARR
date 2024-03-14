@@ -39,6 +39,9 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.DEBUG)
 np.set_printoptions(formatter={'float': '{:0.3f}'.format})
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 TASK_BOUND = [-0.075, -0.455, 0.752, 0.480, 0.455, 1.100]
 
 class RolloutGenerator(object):
@@ -65,6 +68,88 @@ class RolloutGenerator(object):
             return True
         else:
             return False
+        
+    def annotate_transitions(self, waypoints):
+        transitions = []
+        action_descriptions = []
+        grasping = False
+
+        for i in range(len(waypoints) - 1):
+            current_wp = waypoints[i]
+            next_wp = waypoints[i + 1]
+
+            # Convert quaternions to Euler angles (XYZ convention)
+            current_euler = Rotation.from_quat(current_wp[3:7]).as_euler('XYZ', degrees=True)
+            next_euler = Rotation.from_quat(next_wp[3:7]).as_euler('XYZ', degrees=True)
+
+            # Compute differences between waypoints
+            pos_diff = next_wp[:3] - current_wp[:3]
+            ori_diff = np.abs(next_euler - current_euler)
+            gripper_diff = next_wp[7] - current_wp[7]
+            ignore_collision = next_wp[8]
+            transitions.append(np.hstack([pos_diff, ori_diff, gripper_diff, ignore_collision])) 
+
+            actions = []
+
+            if grasping:
+                txt = "State: Holding(object) "
+                if ignore_collision:
+                    txt += "AllowCollision"
+                actions.append(txt + " |")
+            else:
+                if ignore_collision:
+                    actions.append("State: AllowCollision |")
+                else:
+                    actions.append("State: None |")
+            actions.append("Actions: ")
+            # Determine action based on heuristics\
+            translation_magnitude = np.linalg.norm(pos_diff)
+            small_thres = 0.01
+            large_thres = 0.05
+            rotation_threshold = 10
+            if translation_magnitude > small_thres:
+                translation_type = "L" if translation_magnitude > large_thres else "S"
+                if pos_diff[2] < -small_thres:
+                    actions.append(f"move down {translation_type}.")
+                elif pos_diff[2] > small_thres:
+                    actions.append(f"move up {translation_type}.")
+                if pos_diff[0] < -small_thres:
+                    actions.append(f"move backward {translation_type}.")
+                elif pos_diff[0] > small_thres:
+                    actions.append(f"move forward {translation_type}.")
+                if pos_diff[1] > small_thres:
+                    actions.append(f"move right {translation_type}.")
+                elif pos_diff[1] < -small_thres:
+                    actions.append(f"move left {translation_type}.")
+
+            if np.any(ori_diff > rotation_threshold):
+                if (ori_diff[0] > rotation_threshold and ori_diff[1] > rotation_threshold and ori_diff[2] > rotation_threshold):
+                    actions.append("rotate.")
+                else:
+                    if ori_diff[0] > rotation_threshold:
+                        actions.append("rotate about x-axis.")
+                    if ori_diff[1] > rotation_threshold:
+                        actions.append("rotate about y-axis.")
+                    if ori_diff[2] > rotation_threshold:
+                        actions.append("rotate about z-axis.")
+            # else:
+            #     actions.append("negligible rotation")
+
+            if gripper_diff == 1:
+                actions.append("open gripper.")
+                grasping = False
+            elif gripper_diff == -1:
+                actions.append("close gripper.")
+                # if ignore_collision:
+                grasping = True
+
+            if not actions:
+                actions.append("unknown action")
+
+            action_descriptions.append(" ".join(actions))
+
+        return transitions, action_descriptions
+
 
     def generator(self, step_signal: Value, env: Env, agent: Agent,
                   episode_length: int, timesteps: int,
@@ -72,8 +157,9 @@ class RolloutGenerator(object):
                   record_enabled: bool = False,
                   replay_ground_truth: bool = False,
                   perturb: bool = False,
-                  interactive: bool = False
+                  interactive: bool = False, num_wypt_set: set = (), skip_wypt: bool = False
                   ):
+        multiview_img_folder = os.path.join(log_dir, task_name, str(episode_number), "multiview")
         # 1. reset
         # 2. initial obs
         if eval:
@@ -81,7 +167,26 @@ class RolloutGenerator(object):
             # get ground-truth action sequence
             if replay_ground_truth:
                 actions, keypoints, dense_actions, waypoints = env.get_ground_truth_action(eval_demo_seed, 'heuristic') # 'dense' / 'heuristic' / 'awe'
-                print(np.round(actions,3))
+                if skip_wypt:
+                    if len(keypoints) in num_wypt_set:
+                        shutil.rmtree(os.path.join(log_dir, task_name, str(episode_number)))
+                        return
+                    else:
+                        num_wypt_set.add(len(keypoints))
+                actions_with_init = np.vstack([np.array([-0.30895138, 0, 0.82001764, 0.70493394, -0.05539087, 0.70493394, 0.05539087, 1, 0]), actions])
+                transitions, languages = self.annotate_transitions(actions_with_init)
+                for i, lang in enumerate(languages):
+                    print(i+1, lang)
+                    languages[i] = f"{i}. {lang}"
+                with open(os.path.join(multiview_img_folder, "transitions.csv"), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for transition in transitions:
+                        writer.writerow(np.round(transition,1))
+                with open(os.path.join(multiview_img_folder, "fg_lang.csv"), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for fg_lang in languages:
+                        writer.writerow([fg_lang])
+                
         else:
             obs = env.reset()
 
@@ -124,9 +229,9 @@ class RolloutGenerator(object):
                 # 4.
                 if i == len(perturbed_idx) - 1:
                     prev_action = actions[perturbed_idx[idx-1] + p_count * 2,:].copy()
-                    print(np.sum(np.abs(prev_action[0:2] - perturbed_action[0:2])))
+                    # print(np.sum(np.abs(prev_action[0:2] - perturbed_action[0:2])))
                     if np.sum(np.abs(prev_action[0:2] - perturbed_action[0:2])) < 0.001:
-                        print("continue")
+                        # print("continue")
                         perturbed_idx.remove(idx)
                         break
 
@@ -139,7 +244,7 @@ class RolloutGenerator(object):
 
                 # 2.
                 gripper_toggle = np.random.choice([0, 1], p=[0.9, 0.1])
-                print(f"Toggle gripper: {bool(gripper_toggle)}")
+                # print(f"Toggle gripperZ: {bool(gripper_toggle)}")
                 if gripper_toggle:
                     if perturbed_action[8]:
                         perturbed_action[8] = 0.0
@@ -176,7 +281,7 @@ class RolloutGenerator(object):
                         perturbed_action[2] += z_perturbation
                     # print(np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]))
                     if self.check_within_bound(perturbed_action[0:3]):
-                        print(np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]))
+                        # print(np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]))
                         if 0.02 < np.linalg.norm(perturbed_action[0:3] - actions[idx + p_count * 2,:][0:3]) < 0.05:
                             break
 
@@ -205,12 +310,16 @@ class RolloutGenerator(object):
                 actions = np.insert(actions, p_count * 2 + idx, np.vstack([perturbed_action, corrective_action]), axis=0)
                 p_count += 1
             # print(np.round(actions,3))
+                
+        actions_with_init = np.vstack([np.array([-0.30895138, 0, 0.82001764, 0.70493394, -0.05539087, 0.70493394, 0.05539087, 1, 0]), actions])
+        languages = self.annotate_transitions(actions_with_init)
+        for i, lang in enumerate(languages):
+            print(i+1, lang)
 
         # 3. stepping
         step = 0
         perturb_count = 0
         while True:
-            multiview_img_folder = os.path.join(log_dir, task_name, str(episode_number), "multiview")
             for cam in CAMERAS:
                 rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
                 rgb = Image.fromarray(rgb.T).rotate(-90)
@@ -231,8 +340,8 @@ class RolloutGenerator(object):
                         else:
                             img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
                     rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{img_name}.png"))
-                # if interactive:
-                rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
+                if interactive:
+                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
 
             prepped_data = {k:torch.tensor(np.array([v]), device=self._env_device) for k, v in obs_history.items()}
             
@@ -392,8 +501,8 @@ class RolloutGenerator(object):
                             else:
                                 img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
                         rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{img_name}.png"))
-                    # if interactive:
-                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
+                    if interactive:
+                        rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
                 return
 
             if not replay_ground_truth and step == episode_length:
