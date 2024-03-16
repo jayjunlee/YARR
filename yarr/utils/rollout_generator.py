@@ -13,6 +13,7 @@
 
 from multiprocessing import Value
 import random
+import copy
 import numpy as np
 import torch
 import pickle
@@ -329,12 +330,20 @@ class RolloutGenerator(object):
         # 3. stepping
         step = 0
         perturb_count = 0
+        low_dim_obs_path = os.path.join(episode_folder, "obs.pkl")
+        if os.path.exists(low_dim_obs_path):
+            with open(low_dim_obs_path, 'rb') as file:
+                low_dim_obs_dict = pickle.load(file)
+        else:
+            low_dim_obs_dict = {}
+
         while True:
             if not replay_ground_truth:
                 self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
+                # low_dim_obs = self.save_low_dim(obs_copy) -> do we need this for LLaVA training?
             else:
                 if step == 0:
-                    img_name = "wpt0"
+                    img_name = f"wpt0_{perturb_number}"
                 else:
                     if perturb_count <= len(perturbed_idx) - 1:
                         if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
@@ -346,11 +355,14 @@ class RolloutGenerator(object):
                             perturb_count += 1
                         else:
                             img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                            img_name = f"wpt{perturb_count}"
+                            img_name = f"wpt{perturb_count}_{perturb_number}"
                     else:
                         img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                        img_name = f"wpt{perturb_count}"
+                        img_name = f"wpt{perturb_count}_{perturb_number}"
                 self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
+                low_dim_obs = self.save_low_dim(obs_copy)
+                low_dim_obs_dict[img_name] = low_dim_obs
+
             if interactive:
                 self.save_rgb_and_depth_img(obs_copy, episode_folder, "current")
 
@@ -362,6 +374,8 @@ class RolloutGenerator(object):
                 act_result = agent.act(step_signal.value, prepped_data, deterministic=eval)
             else:
                 if step >= len(actions):
+                    with open(low_dim_obs_path, 'wb') as file:
+                        pickle.dump(low_dim_obs_dict, file)
                     return
                 act_result = ActResult(actions[step]) # selects the ith keypoint as action
                 if perturb_count <= len(perturbed_idx) - 1:
@@ -497,7 +511,7 @@ class RolloutGenerator(object):
                         self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
                     else:
                         if step == 0:
-                            img_name = "wpt0"
+                            img_name = f"wpt0_{perturb_number}"
                         else:
                             if perturb_count <= len(perturbed_idx) - 1:
                                 if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
@@ -507,18 +521,28 @@ class RolloutGenerator(object):
                                     perturb_count += 1
                                 else:
                                     img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                                    img_name = f"wpt{perturb_count}"
+                                    img_name = f"wpt{perturb_count}_{perturb_number}"
                             else:
                                 img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                                img_name = f"wpt{perturb_count}"
+                                img_name = f"wpt{perturb_count}_{perturb_number}"
                         self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
+                        low_dim_obs = self.save_low_dim(obs_copy)
+                        low_dim_obs_dict[img_name] = low_dim_obs
+
                     if interactive:
                         self.save_rgb_and_depth_img(obs_copy, episode_folder, "current")
+
+                with open(low_dim_obs_path, 'wb') as file:
+                    pickle.dump(low_dim_obs_dict, file)
                 return
 
             if not replay_ground_truth and step == episode_length:
+                with open(low_dim_obs_path, 'wb') as file:
+                    pickle.dump(low_dim_obs_dict, file)
                 return
             if replay_ground_truth and step == len(actions):
+                with open(low_dim_obs_path, 'wb') as file:
+                    pickle.dump(low_dim_obs_dict, file)
                 return
             
             step += 1
@@ -563,23 +587,48 @@ class RolloutGenerator(object):
         front_depth.save(os.path.join(front_depth_path, f"{filename}.png"))
 
         # We save the images separately, so set these to None for pickling.
-        # obs.left_shoulder_rgb = None
-        # obs.left_shoulder_depth = None
-        # obs.left_shoulder_point_cloud = None
-        # obs.right_shoulder_rgb = None
-        # obs.right_shoulder_depth = None
-        # obs.right_shoulder_point_cloud = None
-        # obs.wrist_rgb = None
-        # obs.wrist_depth = None
-        # obs.wrist_point_cloud = None
-        # obs.front_rgb = None
-        # obs.front_depth = None
-        # obs.front_point_cloud = None
 
-    # def save_low_dim(self, save_path):
-    #     # Save the low-dimension data
-    #     with open(os.path.join(save_path, LOW_DIM_PICKLE), 'wb') as f:
-    #         pickle.dump(demo, f)
+    def save_low_dim(self, obs):
+        obs_copy = copy.deepcopy(obs)
 
-    #     with open(os.path.join(save_path, VARIATION_NUMBER), 'wb') as f:
-    #         pickle.dump(variation, f)
+        obs_copy.left_shoulder_rgb = None
+        obs_copy.left_shoulder_depth = None
+        obs_copy.left_shoulder_point_cloud = None
+        obs_copy.left_shoulder_mask = None
+        obs_copy.right_shoulder_rgb = None
+        obs_copy.right_shoulder_depth = None
+        obs_copy.right_shoulder_point_cloud = None
+        obs_copy.right_shoulder_mask = None
+        obs_copy.overhead_rgb = None
+        obs_copy.overhead_depth = None
+        obs_copy.overhead_point_cloud = None
+        obs_copy.overhead_mask = None
+        obs_copy.wrist_rgb = None
+        obs_copy.wrist_depth = None
+        obs_copy.wrist_point_cloud = None
+        obs_copy.wrist_mask = None
+        obs_copy.front_rgb = None
+        obs_copy.front_depth = None
+        obs_copy.front_point_cloud = None
+        obs_copy.front_mask = None
+
+        obs_copy.joint_velocities = None
+        obs_copy.joint_positions = None
+        obs_copy.joint_forces = None
+        # obs_copy.gripper_open = gripper_open
+        # obs_copy.gripper_pose = gripper_pose
+        obs_copy.gripper_matrix = None
+        # obs_copy.gripper_joint_positions = gripper_joint_positions
+        obs_copy.gripper_touch_forces = None
+        obs_copy.task_low_dim_state = None
+        # obs_copy.ignore_collisions = ignore_collisions
+        # obs_copy.misc = misc
+
+        return obs_copy
+
+        # # Save the low-dimension data
+        # with open(os.path.join(save_path, LOW_DIM_PICKLE), 'wb') as f:
+        #     pickle.dump(demo, f)
+
+        # with open(os.path.join(save_path, VARIATION_NUMBER), 'wb') as f:
+        #     pickle.dump(variation, f)
