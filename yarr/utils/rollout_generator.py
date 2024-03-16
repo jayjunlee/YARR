@@ -15,10 +15,13 @@ from multiprocessing import Value
 import random
 import numpy as np
 import torch
+import pickle
 from yarr.agents.agent import Agent
 from yarr.envs.env import Env
 from yarr.utils.transition import ReplayTransition
 from yarr.agents.agent import ActResult
+from rlbench.backend.const import *
+from rlbench.backend import utils
 
 from rvt.utils.peract_utils import CAMERAS
 from rvt.libs.peract.helpers.demo_loading_utils import keypoint_discovery
@@ -44,6 +47,10 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 TASK_BOUND = [-0.075, -0.455, 0.752, 0.480, 0.455, 1.100]
 
+def check_and_make(dir):
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+
 class RolloutGenerator(object):
 
     def __init__(self, env_device = 'cuda:0'):
@@ -53,6 +60,9 @@ class RolloutGenerator(object):
         if x.dtype == np.float64:
             return np.float32
         return x.dtype
+    
+    def interactive_keyboard_control(self):
+        pass
     
     def check_within_bound(self, waypoint):
         if (waypoint[0] > TASK_BOUND[0] and waypoint[0] < TASK_BOUND[3]) and \
@@ -69,7 +79,7 @@ class RolloutGenerator(object):
         else:
             return False
         
-    def annotate_transitions(self, waypoints):
+    def annotate_transitions(self, waypoints, perturbing=False):
         transitions = []
         action_descriptions = []
         grasping = False
@@ -157,13 +167,13 @@ class RolloutGenerator(object):
                   record_enabled: bool = False,
                   replay_ground_truth: bool = False,
                   perturb: bool = False,
-                  interactive: bool = False, num_wypt_set: set = (), skip_wypt: bool = False
+                  interactive: bool = False, num_wypt_set: set = (), skip_wypt: bool = False, perturb_number: int = 1
                   ):
-        multiview_img_folder = os.path.join(log_dir, task_name, str(episode_number), "multiview")
+        episode_folder = os.path.join(log_dir, task_name, str(episode_number))
         # 1. reset
         # 2. initial obs
         if eval:
-            obs = env.reset_to_demo(eval_demo_seed) # this is using the same initial config of a test data
+            obs, obs_copy = env.reset_to_demo(eval_demo_seed) # this is using the same initial config of a test data
             # get ground-truth action sequence
             if replay_ground_truth:
                 actions, keypoints, dense_actions, waypoints = env.get_ground_truth_action(eval_demo_seed, 'heuristic') # 'dense' / 'heuristic' / 'awe'
@@ -178,11 +188,11 @@ class RolloutGenerator(object):
                 for i, lang in enumerate(languages):
                     print(i+1, lang)
                     languages[i] = f"{i}. {lang}"
-                with open(os.path.join(multiview_img_folder, "transitions.csv"), 'w', newline='') as csvfile:
+                with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
                     writer = csv.writer(csvfile)
                     for transition in transitions:
                         writer.writerow(np.round(transition,1))
-                with open(os.path.join(multiview_img_folder, "fg_lang.csv"), 'w', newline='') as csvfile:
+                with open(os.path.join(episode_folder, "fg_lang.csv"), 'w', newline='') as csvfile:
                     writer = csv.writer(csvfile)
                     for fg_lang in languages:
                         writer.writerow([fg_lang])
@@ -320,28 +330,29 @@ class RolloutGenerator(object):
         step = 0
         perturb_count = 0
         while True:
-            for cam in CAMERAS:
-                rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
-                rgb = Image.fromarray(rgb.T).rotate(-90)
-                if not replay_ground_truth:
-                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{step}.png"))
+            if not replay_ground_truth:
+                self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
+            else:
+                if step == 0:
+                    img_name = "wpt0"
                 else:
-                    if step == 0:
-                        img_name = 0
-                    else:
-                        if perturb_count <= len(perturbed_idx) - 1:
-                            if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                                img_name = f"{keypoints[step - 2 * perturb_count - 1]}_1_perturbed"
-                            elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
-                                img_name = f"{keypoints[step - 2 * perturb_count - 2]}_2_corrected"
-                                perturb_count += 1
-                            else:
-                                img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
+                    if perturb_count <= len(perturbed_idx) - 1:
+                        if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
+                            # img_name = f"{keypoints[step - 2 * perturb_count - 1]}_1_perturbed"
+                            img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
+                        elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
+                            # img_name = f"{keypoints[step - 2 * perturb_count - 2]}_2_corrected"
+                            img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
+                            perturb_count += 1
                         else:
                             img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{img_name}.png"))
-                if interactive:
-                    rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
+                            img_name = f"wpt{perturb_count}"
+                    else:
+                        img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
+                        img_name = f"wpt{perturb_count}"
+                self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
+            if interactive:
+                self.save_rgb_and_depth_img(obs_copy, episode_folder, "current")
 
             prepped_data = {k:torch.tensor(np.array([v]), device=self._env_device) for k, v in obs_history.items()}
             
@@ -426,10 +437,8 @@ class RolloutGenerator(object):
             agent_obs_elems = {k: np.array(v) for k, v in act_result.observation_elements.items()}
             extra_replay_elements = {k: np.array(v) for k, v in act_result.replay_elements.items()}
 
-
-
             # 4. step through environment; 
-            transition = env.step(act_result)
+            transition, obs_copy = env.step(act_result)
             # new obs?
             obs_tp1 = dict(transition.observation)
             timeout = False
@@ -485,24 +494,26 @@ class RolloutGenerator(object):
                     rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
                     rgb = Image.fromarray(rgb.T).rotate(-90)
                     if not replay_ground_truth:
-                        rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{step}.png"))
+                        self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
                     else:
                         if step == 0:
-                            img_name = 0
+                            img_name = "wpt0"
                         else:
                             if perturb_count <= len(perturbed_idx) - 1:
                                 if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                                    img_name = f"{keypoints[step - 2 * perturb_count - 1]}_1_perturbed"
+                                    img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
                                 elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
-                                    img_name = f"{keypoints[step - 2 * perturb_count - 2]}_2_corrected"
+                                    img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
                                     perturb_count += 1
                                 else:
                                     img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
+                                    img_name = f"wpt{perturb_count}"
                             else:
                                 img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                        rgb.save(os.path.join(multiview_img_folder, f"{cam}", f"{img_name}.png"))
+                                img_name = f"wpt{perturb_count}"
+                        self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
                     if interactive:
-                        rgb.save(os.path.join(multiview_img_folder, f"{cam}", "current.png"))
+                        self.save_rgb_and_depth_img(obs_copy, episode_folder, "current")
                 return
 
             if not replay_ground_truth and step == episode_length:
@@ -511,3 +522,64 @@ class RolloutGenerator(object):
                 return
             
             step += 1
+
+    # obs here is rlbench.backend.observation.Observation object
+    def save_rgb_and_depth_img(self, obs, save_path, filename):
+        # Save image data first, and then None the image data, and pickle
+        left_shoulder_rgb_path = os.path.join(save_path, LEFT_SHOULDER_RGB_FOLDER)
+        left_shoulder_depth_path = os.path.join(save_path, LEFT_SHOULDER_DEPTH_FOLDER)
+        right_shoulder_rgb_path = os.path.join(save_path, RIGHT_SHOULDER_RGB_FOLDER)
+        right_shoulder_depth_path = os.path.join(save_path, RIGHT_SHOULDER_DEPTH_FOLDER)
+        wrist_rgb_path = os.path.join(save_path, WRIST_RGB_FOLDER)
+        wrist_depth_path = os.path.join(save_path, WRIST_DEPTH_FOLDER)
+        front_rgb_path = os.path.join(save_path, FRONT_RGB_FOLDER)
+        front_depth_path = os.path.join(save_path, FRONT_DEPTH_FOLDER)
+
+        check_and_make(left_shoulder_rgb_path)
+        check_and_make(left_shoulder_depth_path)
+        check_and_make(right_shoulder_rgb_path)
+        check_and_make(right_shoulder_depth_path)
+        check_and_make(wrist_rgb_path)
+        check_and_make(wrist_depth_path)
+        check_and_make(front_rgb_path)
+        check_and_make(front_depth_path)
+
+        left_shoulder_rgb = Image.fromarray(obs.left_shoulder_rgb)
+        left_shoulder_depth = utils.float_array_to_rgb_image(obs.left_shoulder_depth, scale_factor=DEPTH_SCALE)
+        right_shoulder_rgb = Image.fromarray(obs.right_shoulder_rgb)
+        right_shoulder_depth = utils.float_array_to_rgb_image(obs.right_shoulder_depth, scale_factor=DEPTH_SCALE)
+        wrist_rgb = Image.fromarray(obs.wrist_rgb)
+        wrist_depth = utils.float_array_to_rgb_image(obs.wrist_depth, scale_factor=DEPTH_SCALE)
+        front_rgb = Image.fromarray(obs.front_rgb)
+        front_depth = utils.float_array_to_rgb_image(obs.front_depth, scale_factor=DEPTH_SCALE)
+
+        left_shoulder_rgb.save(os.path.join(left_shoulder_rgb_path, f"{filename}.png"))
+        left_shoulder_depth.save(os.path.join(left_shoulder_depth_path, f"{filename}.png"))
+        right_shoulder_rgb.save(os.path.join(right_shoulder_rgb_path, f"{filename}.png"))
+        right_shoulder_depth.save(os.path.join(right_shoulder_depth_path, f"{filename}.png"))
+        wrist_rgb.save(os.path.join(wrist_rgb_path, f"{filename}.png"))
+        wrist_depth.save(os.path.join(wrist_depth_path, f"{filename}.png"))
+        front_rgb.save(os.path.join(front_rgb_path, f"{filename}.png"))
+        front_depth.save(os.path.join(front_depth_path, f"{filename}.png"))
+
+        # We save the images separately, so set these to None for pickling.
+        # obs.left_shoulder_rgb = None
+        # obs.left_shoulder_depth = None
+        # obs.left_shoulder_point_cloud = None
+        # obs.right_shoulder_rgb = None
+        # obs.right_shoulder_depth = None
+        # obs.right_shoulder_point_cloud = None
+        # obs.wrist_rgb = None
+        # obs.wrist_depth = None
+        # obs.wrist_point_cloud = None
+        # obs.front_rgb = None
+        # obs.front_depth = None
+        # obs.front_point_cloud = None
+
+    # def save_low_dim(self, save_path):
+    #     # Save the low-dimension data
+    #     with open(os.path.join(save_path, LOW_DIM_PICKLE), 'wb') as f:
+    #         pickle.dump(demo, f)
+
+    #     with open(os.path.join(save_path, VARIATION_NUMBER), 'wb') as f:
+    #         pickle.dump(variation, f)
