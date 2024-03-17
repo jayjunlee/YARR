@@ -123,21 +123,42 @@ class RolloutGenerator(object):
                 translation_type = "L" if translation_magnitude > large_thres else "S"
                 # print(pos_diff)
                 if pos_diff[2] < -small_thres:
-                    actions.append(f"move down {translation_type}.")
+                    if not perturbing:
+                        actions.append(f"move down {translation_type}.")
+                    if perturbing:
+                        actions.append(f"failed bc you moved down {translation_type}")
                 elif pos_diff[2] > small_thres:
-                    actions.append(f"move up {translation_type}.")
+                    if not perturbing:
+                        actions.append(f"move up {translation_type}.")
+                    if perturbing:
+                        actions.append(f"failed bc you moved up {translation_type}")
                 if pos_diff[0] < -small_thres:
-                    actions.append(f"move backward {translation_type}.")
+                    if not perturbing:
+                        actions.append(f"move backward {translation_type}.")
+                    if perturbing:
+                        actions.append(f"failed bc you moved backward {translation_type}")
                 elif pos_diff[0] > small_thres:
-                    actions.append(f"move forward {translation_type}.")
+                    if not perturbing:
+                        actions.append(f"move forward {translation_type}.")
+                    if perturbing:
+                        actions.append(f"failed bc you moved forward {translation_type}")
                 if pos_diff[1] > small_thres:
-                    actions.append(f"move right {translation_type}.")
+                    if not perturbing:
+                        actions.append(f"move right {translation_type}.")
+                    if perturbing:
+                        actions.append(f"failed bc you moved right {translation_type}")
                 elif pos_diff[1] < -small_thres:
-                    actions.append(f"move left {translation_type}.")
+                    if not perturbing:
+                        actions.append(f"move left {translation_type}.")
+                    if perturbing:
+                        actions.append(f"failed bc you moved left {translation_type}")
 
             if np.any(ori_diff > rotation_threshold):
                 if (ori_diff[0] > rotation_threshold and ori_diff[1] > rotation_threshold and ori_diff[2] > rotation_threshold):
-                    actions.append("rotate.")
+                    if not perturbing:
+                        actions.append(f"rotate.")
+                    if perturbing:
+                        actions.append(f"failed bc you rotated")
                 else:
                     if ori_diff[0] > rotation_threshold:
                         actions.append("rotate about x-axis.")
@@ -149,10 +170,16 @@ class RolloutGenerator(object):
             #     actions.append("negligible rotation")
 
             if gripper_diff == 1:
-                actions.append("open gripper.")
+                if not perturbing:
+                    actions.append(f"open gripper.")
+                if perturbing:
+                    actions.append(f"failed bc you opened gripper")
                 grasping = False
             elif gripper_diff == -1:
-                actions.append("close gripper.")
+                if not perturbing:
+                    actions.append(f"clsoed gripper.")
+                if perturbing:
+                    actions.append(f"failed bc you closed gripper")
                 # if ignore_collision:
                 grasping = True
 
@@ -166,7 +193,7 @@ class RolloutGenerator(object):
 
     def generator(self, step_signal: Value, env: Env, agent: Agent,
                   episode_length: int, timesteps: int,
-                  eval: bool, log_dir, task_name, episode_number, eval_demo_seed: int = 0,
+                  eval: bool, log_dir, task_name, episode_number, language_description, eval_demo_seed: int = 0,
                   record_enabled: bool = False,
                   replay_ground_truth: bool = False,
                   perturb: bool = False,
@@ -177,6 +204,11 @@ class RolloutGenerator(object):
         # 2. initial obs
         if eval:
             obs, obs_copy = env.reset_to_demo(eval_demo_seed) # this is using the same initial config of a test data
+            if "task" not in language_description:
+                language_description["task"] = env._lang_goal
+            if "subgoal" not in language_description:
+                language_description["subgoal"] = {}
+
             # get ground-truth action sequence
             if replay_ground_truth:
                 actions, keypoints, dense_actions, waypoints = env.get_ground_truth_action(eval_demo_seed, 'heuristic') # 'dense' / 'heuristic' / 'awe'
@@ -192,7 +224,15 @@ class RolloutGenerator(object):
                     actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
                     transitions, languages = self.annotate_transitions(actions_with_init)
                     for i, lang in enumerate(languages):
-                        print(i+1, lang)
+                        print(i, lang)
+                        keypoint_transition_lang = {}
+                        if i == 0:
+                            keypoint_transition_lang["label"] = "start"
+                        else:
+                            keypoint_transition_lang["label"] = "success"
+                        keypoint_transition_lang["lang"] = lang
+                        language_description["subgoal"][f"{keypoints[i]}"] = keypoint_transition_lang
+
                         languages[i] = f"{i}. {lang}"
                         with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
                             writer = csv.writer(csvfile)
@@ -332,9 +372,54 @@ class RolloutGenerator(object):
         if perturb:
             print("========== Verbalized Augmented Waypoint Transitions ==========")
             actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
-            transitions, languages = self.annotate_transitions(actions_with_init)
-            for i, lang in enumerate(languages):
-                print(i+1, lang)
+            keypoint_transition_lang = {}
+            for i in (range(len(actions_with_init)-1)):
+                failure_lang = {}
+                correct_lang = {}
+                fail = False
+                correct = False
+                transitions, languages = self.annotate_transitions(actions_with_init)
+                if i % 3 == 0:
+                    if i == 0:
+                        _, lang = self.annotate_transitions(actions_with_init[i:i+2])
+                        print("start", i, lang)
+                        keypoint_transition_lang["label"] = "start"
+                        keypoint_transition_lang["lang"] = lang[0]
+                    else:
+                        _, lang = self.annotate_transitions(actions_with_init[i:i+2])
+                        print("success", i, lang)
+                        keypoint_transition_lang["label"] = "success"
+                        keypoint_transition_lang["lang"] = lang[0]
+                if i % 3 == 1:
+                    _, lang = self.annotate_transitions(actions_with_init[i:i+2], perturbing=True) # TODO => maybe call a different function?
+                    print("failure", i, lang)
+                    fail = True
+                    failure_lang["label"] = "failure"
+                    failure_lang["lang"] = lang[0]
+                if i % 3 == 2:
+                    _, lang = self.annotate_transitions(actions_with_init[i:i+2])
+                    print("correction", i, lang)
+                    correct = True
+                    correct_lang["label"] = "correction"
+                    correct_lang["lang"] = lang[0]
+
+                if not fail and not correct:
+                    if f"{keypoints[i//3]}" not in language_description["subgoal"]:
+                        language_description["subgoal"][f"{keypoints[i//3]}"] = {}
+                    if i == 0:
+                        language_description["subgoal"][f"{keypoints[i//3]}"]["label"] = "start"
+                    else:
+                        language_description["subgoal"][f"{keypoints[i//3]}"]["label"] = "success"
+                    language_description["subgoal"][f"{keypoints[i//3]}"]["lang"] = lang[0]
+                if fail:
+                    if "fail" not in language_description["subgoal"][f"{keypoints[i//3]}"]:
+                        language_description["subgoal"][f"{keypoints[i//3]}"]["fail"] = {}
+                    language_description["subgoal"][f"{keypoints[i//3]}"]["fail"][f"perturb_{perturb_number}"] = failure_lang
+                if correct: 
+                    if "fail" not in language_description["subgoal"][f"{keypoints[i//3]}"]:
+                        language_description["subgoal"][f"{keypoints[i//3]}"]["fail"] = {}
+                    language_description["subgoal"][f"{keypoints[i//3]}"]["fail"][f"perturb_{perturb_number}(correct)"] = correct_lang
+
                 languages[i] = f"{i}. {lang}"
                 with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
                     writer = csv.writer(csvfile)
@@ -344,6 +429,7 @@ class RolloutGenerator(object):
                     writer = csv.writer(csvfile)
                     for fg_lang in languages:
                         writer.writerow([fg_lang])
+
             print()
 
         print("====== Begin Stepping ======")
@@ -490,7 +576,6 @@ class RolloutGenerator(object):
             obs_and_replay_elems.update(obs)
             obs_and_replay_elems.update(agent_obs_elems)
             obs_and_replay_elems.update(extra_replay_elements)
-            # TODO_JJL print what's inside obs_and_replay_elems
 
             for k in obs_history.keys():
                 obs_history[k].append(transition.observation[k])
@@ -518,12 +603,10 @@ class RolloutGenerator(object):
                 env.env._action_mode.arm_action_mode.record_end(env.env._scene, steps=60, step_scene=True)
 
             # 4. new obs
-            # TODO_JJL
             obs = dict(transition.observation)
 
             yield replay_transition
 
-            # TODO_JJL how to deal with termination or too early termination
             if transition.info.get("needs_reset", transition.terminal):
                 step += 1
                 if not replay_ground_truth:
