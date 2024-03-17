@@ -47,6 +47,7 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 TASK_BOUND = [-0.075, -0.455, 0.752, 0.480, 0.455, 1.100]
+PANDA_INIT_ACTION = np.array([2.78467745e-01, -8.16867873e-03, 1.47196412e+00, -2.93883204e-06, 9.92665470e-01, -2.89610603e-06, 1.20894387e-01, 1, 0])
 
 def check_and_make(dir):
     if not os.path.exists(dir):
@@ -120,6 +121,7 @@ class RolloutGenerator(object):
             rotation_threshold = 10
             if translation_magnitude > small_thres:
                 translation_type = "L" if translation_magnitude > large_thres else "S"
+                # print(pos_diff)
                 if pos_diff[2] < -small_thres:
                     actions.append(f"move down {translation_type}.")
                 elif pos_diff[2] > small_thres:
@@ -184,19 +186,23 @@ class RolloutGenerator(object):
                         return
                     else:
                         num_wypt_set.add(len(keypoints))
-                actions_with_init = np.vstack([np.array([-0.30895138, 0, 0.82001764, 0.70493394, -0.05539087, 0.70493394, 0.05539087, 1, 0]), actions])
-                transitions, languages = self.annotate_transitions(actions_with_init)
-                for i, lang in enumerate(languages):
-                    print(i+1, lang)
-                    languages[i] = f"{i}. {lang}"
-                with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
-                    writer = csv.writer(csvfile)
-                    for transition in transitions:
-                        writer.writerow(np.round(transition,1))
-                with open(os.path.join(episode_folder, "fg_lang.csv"), 'w', newline='') as csvfile:
-                    writer = csv.writer(csvfile)
-                    for fg_lang in languages:
-                        writer.writerow([fg_lang])
+                
+                if not perturb:
+                    print("========== Verbalized Demo Waypoint Transitions ==========")
+                    actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
+                    transitions, languages = self.annotate_transitions(actions_with_init)
+                    for i, lang in enumerate(languages):
+                        print(i+1, lang)
+                        languages[i] = f"{i}. {lang}"
+                        with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
+                            writer = csv.writer(csvfile)
+                            for transition in transitions:
+                                writer.writerow(np.round(transition,1))
+                        with open(os.path.join(episode_folder, "fg_lang.csv"), 'w', newline='') as csvfile:
+                            writer = csv.writer(csvfile)
+                            for fg_lang in languages:
+                                writer.writerow([fg_lang])
+                    print()
                 
         else:
             obs = env.reset()
@@ -321,11 +327,26 @@ class RolloutGenerator(object):
                 actions = np.insert(actions, p_count * 2 + idx, np.vstack([perturbed_action, corrective_action]), axis=0)
                 p_count += 1
             # print(np.round(actions,3))
-                
-        actions_with_init = np.vstack([np.array([-0.30895138, 0, 0.82001764, 0.70493394, -0.05539087, 0.70493394, 0.05539087, 1, 0]), actions])
-        languages = self.annotate_transitions(actions_with_init)
-        for i, lang in enumerate(languages):
-            print(i+1, lang)
+
+        # language after perturbibng
+        if perturb:
+            print("========== Verbalized Augmented Waypoint Transitions ==========")
+            actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
+            transitions, languages = self.annotate_transitions(actions_with_init)
+            for i, lang in enumerate(languages):
+                print(i+1, lang)
+                languages[i] = f"{i}. {lang}"
+                with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for transition in transitions:
+                        writer.writerow(np.round(transition,1))
+                with open(os.path.join(episode_folder, "fg_lang.csv"), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for fg_lang in languages:
+                        writer.writerow([fg_lang])
+            print()
+
+        print("====== Begin Stepping ======")
 
         # 3. stepping
         step = 0
@@ -347,20 +368,21 @@ class RolloutGenerator(object):
                 else:
                     if perturb_count <= len(perturbed_idx) - 1:
                         if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                            # img_name = f"{keypoints[step - 2 * perturb_count - 1]}_1_perturbed"
                             img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
                         elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
-                            # img_name = f"{keypoints[step - 2 * perturb_count - 2]}_2_corrected"
                             img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
                             perturb_count += 1
                         else:
                             img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
                             img_name = f"wpt{perturb_count}_{perturb_number}"
-                    else:
-                        img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                        img_name = f"wpt{perturb_count}_{perturb_number}"
+                    else: 
+                        if replay_ground_truth:
+                            img_name = f"wpt{step}_{perturb_number}"
+                        else:
+                            img_name = f"wpt{perturb_count}_{perturb_number}"
                 self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
                 low_dim_obs = self.save_low_dim(obs_copy)
+                print(f"Step {step}     | Gripper pose: {low_dim_obs.gripper_pose}")
                 low_dim_obs_dict[img_name] = low_dim_obs
 
             if interactive:
@@ -380,13 +402,13 @@ class RolloutGenerator(object):
                 act_result = ActResult(actions[step]) # selects the ith keypoint as action
                 if perturb_count <= len(perturbed_idx) - 1:
                     if step == 2 * perturb_count + perturbed_idx[perturb_count]:
-                        print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (perturbed waypoint {keypoints[step - 2 * perturb_count]})")
+                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (perturbed waypoint {keypoints[step - 2 * perturb_count]})")
                     elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                        print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (corrected waypoint {keypoints[step - 2 * perturb_count - 1]} = dense waypoint idx {corrective_idx[perturb_count]})")
+                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (corrected waypoint {keypoints[step - 2 * perturb_count - 1]} = dense waypoint idx {corrective_idx[perturb_count]})")
                     else:
-                        print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step - 2 * perturb_count]})")
+                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step - 2 * perturb_count]})")
                 else:
-                    print(f"Step {step} | pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step - 2 * perturb_count]})")
+                    print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step - 2 * perturb_count]})")
                     
 
             # 3-2. take interactive actions
@@ -504,33 +526,34 @@ class RolloutGenerator(object):
             # TODO_JJL how to deal with termination or too early termination
             if transition.info.get("needs_reset", transition.terminal):
                 step += 1
-                for cam in CAMERAS:
-                    rgb = obs[f'{cam}_rgb'] # (3, IMAGE_SIZE, IMAGE_SIZE)
-                    rgb = Image.fromarray(rgb.T).rotate(-90)
-                    if not replay_ground_truth:
-                        self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
+                if not replay_ground_truth:
+                    self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
+                else:
+                    if step == 0:
+                        img_name = f"wpt0_{perturb_number}"
                     else:
-                        if step == 0:
-                            img_name = f"wpt0_{perturb_number}"
-                        else:
-                            if perturb_count <= len(perturbed_idx) - 1:
-                                if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                                    img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
-                                elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
-                                    img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
-                                    perturb_count += 1
-                                else:
-                                    img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                                    img_name = f"wpt{perturb_count}_{perturb_number}"
+                        if perturb_count <= len(perturbed_idx) - 1:
+                            if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
+                                img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
+                            elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
+                                img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
+                                perturb_count += 1
                             else:
                                 img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
                                 img_name = f"wpt{perturb_count}_{perturb_number}"
-                        self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
-                        low_dim_obs = self.save_low_dim(obs_copy)
-                        low_dim_obs_dict[img_name] = low_dim_obs
+                        else:
+                            if replay_ground_truth:
+                                img_name = f"wpt{step}_{perturb_number}"
+                            else:
+                                img_name = f"wpt{perturb_count}_{perturb_number}"
+                    self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
+                    low_dim_obs = self.save_low_dim(obs_copy)
+                    print(f"Step {step}     | Gripper pose: {low_dim_obs.gripper_pose}")
+                    low_dim_obs_dict[img_name] = low_dim_obs
+                    print()
 
-                    if interactive:
-                        self.save_rgb_and_depth_img(obs_copy, episode_folder, "current")
+                if interactive:
+                    self.save_rgb_and_depth_img(obs_copy, episode_folder, "current")
 
                 with open(low_dim_obs_path, 'wb') as file:
                     pickle.dump(low_dim_obs_dict, file)
