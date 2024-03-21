@@ -53,6 +53,21 @@ def check_and_make(dir):
     if not os.path.exists(dir):
         os.makedirs(dir)
 
+def insert_before_actions(input_string, word_to_insert):
+    index = input_string.find("Actions")
+    if index == -1:
+        return input_string
+    return input_string[:index] + word_to_insert + " " + input_string[index:]
+
+def action_to_human_readable_str(action):
+    human_readable_action = list(range(8))
+    human_readable_action[0:3] = action[0:3] # xyz
+    human_readable_action[3:6] = Rotation.from_quat(action[3:7]).as_euler('XYZ', degrees=True) # euler angles
+    human_readable_action[6] = action[7] # gripper
+    human_readable_action[7] = action[8] # collision
+    human_readable_action = str([round(action, 4) for action in human_readable_action])
+    return human_readable_action
+
 class RolloutGenerator(object):
 
     def __init__(self, env_device = 'cuda:0'):
@@ -186,7 +201,7 @@ class RolloutGenerator(object):
                 grasping = False
             elif gripper_diff == -1:
                 if not perturbing:
-                    actions.append(f"clsoed gripper.")
+                    actions.append(f"closed gripper.")
                 if perturbing:
                     actions.append(f"failed bc you closed gripper")
                 # if ignore_collision:
@@ -217,13 +232,7 @@ class RolloutGenerator(object):
             if "task" not in language_description:
                 language_description["task"] = env._lang_goal
             if "init" not in language_description:
-                human_readable_action = list(range(8))
-                human_readable_action[0:3] = PANDA_INIT_ACTION[0:3] # xyz
-                human_readable_action[3:6] = Rotation.from_quat(PANDA_INIT_ACTION[3:7]).as_euler('XYZ', degrees=True) # euler angles
-                human_readable_action[6] = PANDA_INIT_ACTION[7] # gripper
-                human_readable_action[7] = PANDA_INIT_ACTION[8] # collision
-                human_readable_action = [round(action, 3) for action in human_readable_action]
-                language_description["init"] = str(human_readable_action)
+                language_description["init"] = action_to_human_readable_str(PANDA_INIT_ACTION)
 
             # get ground-truth action sequence
             if replay_ground_truth:
@@ -293,7 +302,7 @@ class RolloutGenerator(object):
         resolution = 5
 
         # noise params
-        translation_noise = 0.2
+        translation_noise = 0.4
         rotation_noise = 45
         min_dist_thres = 0.02
         max_dist_thres = 0.05
@@ -316,8 +325,11 @@ class RolloutGenerator(object):
                     prev_action = actions[perturbed_idx[idx-1] + p_count * 2,:].copy()
                     # print(np.sum(np.abs(prev_action[0:2] - perturbed_action[0:2])))
                     if np.sum(np.abs(prev_action[0:2] - perturbed_action[0:2])) < 0.001:
-                        # print("continue")
+                        print("continue1")
                         perturbed_idx.remove(idx)
+                        break
+                    if prev_action[7] and not perturbed_action[7]:
+                        print("continue2")
                         break
 
                 # 1. 
@@ -328,13 +340,13 @@ class RolloutGenerator(object):
                 # perturbed_action[3:7] = disc
 
                 # 2.
-                gripper_toggle = np.random.choice([0, 1], p=[0.9, 0.1])
-                # print(f"Toggle gripperZ: {bool(gripper_toggle)}")
-                if gripper_toggle:
-                    if perturbed_action[8]:
-                        perturbed_action[8] = 0.0
-                    else:
-                        perturbed_action[8] = 1.0
+                # gripper_toggle = np.random.choice([0, 1], p=[0.9, 0.1])
+                # # print(f"Toggle gripperZ: {bool(gripper_toggle)}")
+                # if gripper_toggle:
+                #     if perturbed_action[8]:
+                #         perturbed_action[8] = 0.0
+                #     else:
+                #         perturbed_action[8] = 1.0
                 
                 # 3.
                 perturbed_action_ckpt = perturbed_action[0:3].copy()
@@ -397,74 +409,77 @@ class RolloutGenerator(object):
             # print(np.round(actions,3))
 
         print("===== Augmented Actions =====")
-        print(actions)        
+        print(actions)
 
+        keypoints_with_init = [0] + keypoints
         # language after perturbibng
         if perturb:
             print("========== Verbalized Augmented Waypoint Transitions ==========")
             actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
             keypoint_transition_lang = {}
-            for i in (range(len(actions_with_init)-2)):
+            for i in (range(len(actions_with_init)-1)):
+                print(keypoints_with_init[i//3])
                 failure_lang = {}
-                correct_lang = {}
+                ongoing_lang = {}
                 fail = False
-                correct = False
+                ongoing = False
                 transitions, languages = self.annotate_transitions(actions_with_init)
-                human_readable_action = list(range(8))
-                human_readable_action[0:3] = actions_with_init[i+1][0:3] # xyz
-                human_readable_action[3:6] = Rotation.from_quat(actions_with_init[i+1][3:7]).as_euler('XYZ', degrees=True) # euler angles
-                human_readable_action[6] = actions_with_init[i+1][7] # gripper
-                human_readable_action[7] = actions_with_init[i+1][8] # collision
-                human_readable_action = str([round(action, 3) for action in human_readable_action])
-                if i % 3 == 2:
-                    if i == 0:
-                        _, lang = self.annotate_transitions(actions_with_init[i+1:i+3])
-                        print("start", i, lang)
-                        keypoint_transition_lang["label"] = "start"
-                        keypoint_transition_lang["lang"] = lang[0]
-                        keypoint_transition_lang["action"] = human_readable_action
-                    else:
-                        _, lang = self.annotate_transitions(actions_with_init[i+1:i+3])
-                        print("success", i, lang)
-                        keypoint_transition_lang["label"] = "success"
-                        keypoint_transition_lang["lang"] = lang[0]
-                        keypoint_transition_lang["action"] = human_readable_action
+                human_readable_action = action_to_human_readable_str(actions_with_init[i+1])
+                
+                # the pattern goes: init (0) -> perturb -> correct -> success (wpt1) -> perturb -> correct -> success (wpt2) -> ...
+                # all language labels are written as if they were given as commands at the current step
+                # for start/success labelled commands, they are commands to make the robots do desired action
+                # for failure labelled commands, they are 1) failure description and explanation + 2) command on how to recover to original line of trajectory
+                # for ongoing commands, the robot has recovered to original line of trajectory and we are sending off the remaining part as a command to reach the keypoint 
                 if i % 3 == 0:
-                    _, lang = self.annotate_transitions(actions_with_init[i+1:i+3], perturbing=True) # TODO => maybe call a different function?
+                    _, lang = self.annotate_transitions(actions_with_init[i:i+2], perturbing=True) # TODO => maybe call a different function?
                     print("failure", i, lang)
+                    print(actions_with_init[i:i+2])
                     fail = True
                     failure_lang["label"] = "failure"
-                    failure_lang["lang"] = lang[0]
+                    failure_lang["lang"] = insert_before_actions(lang[0], "Reflection")
                     failure_lang["action"] = human_readable_action
-                if i % 3 == 1:
-                    _, lang = self.annotate_transitions(actions_with_init[i+1:i+3])
-                    print("correction", i, lang)
-                    correct = True
-                    correct_lang["label"] = "correction"
-                    correct_lang["lang"] = lang[0]
-                    correct_lang["action"] = human_readable_action
+                    if i < len(actions_with_init) - 3:
+                        _, lang = self.annotate_transitions(np.vstack([actions_with_init[i+1],actions_with_init[i+3]]))
+                        print("correction", i, lang)
+                        print(np.vstack([actions_with_init[i+1],actions_with_init[i+3]]))
+                        failure_lang["lang"] += (" & " + insert_before_actions(lang[0], "Instruction"))
+                        human_readable_action = action_to_human_readable_str(actions_with_init[i+2])
+                        failure_lang["action"] += (" & " + human_readable_action)
 
-                if f"{keypoints[i//3]}" not in language_description["subgoal"]:
-                    language_description["subgoal"][f"{keypoints[i//3]}"] = {}
-                
-                if not fail and not correct:
-                    if i == 0:
-                        language_description["subgoal"][f"{keypoints[i//3]}"]["label"] = "start"
+                    if f"{keypoints_with_init[i//3]}" not in language_description["subgoal"]:
+                        language_description["subgoal"][f"{keypoints_with_init[i//3]}"] = {}
+
+                    _, lang = self.annotate_transitions(np.vstack([actions_with_init[i],actions_with_init[i+3]]))
+                    if keypoints_with_init[i//3] == 0:
+                        language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["label"] = "start"
                     else:
-                        language_description["subgoal"][f"{keypoints[i//3]}"]["label"] = "success"
-                    language_description["subgoal"][f"{keypoints[i//3]}"]["lang"] = lang[0]
-                    language_description["subgoal"][f"{keypoints[i//3]}"]["action"] = human_readable_action
+                        language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["label"] = "success"
+                        print("success", i, lang)
+                        print(actions_with_init[i:i+2])
+                    language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["lang"] = lang[0]
+                    human_readable_action = action_to_human_readable_str(actions_with_init[i+3])
+                    language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["action"] = human_readable_action
+
+                if i % 3 == 2:
+                    _, lang = self.annotate_transitions(actions_with_init[i:i+2])
+                    print("ongoing", i, lang)
+                    print(actions_with_init[i:i+2])
+                    ongoing = True
+                    ongoing_lang["label"] = "ongoing"
+                    ongoing_lang["lang"] = lang[0]
+                    ongoing_lang["action"] = human_readable_action
                 
                 if fail:
-                    if "fail" not in language_description["subgoal"][f"{keypoints[i//3]}"]:
-                        language_description["subgoal"][f"{keypoints[i//3]}"]["fail"] = {}
-                    language_description["subgoal"][f"{keypoints[i//3]}"]["fail"][f"perturb_{perturb_number}"] = failure_lang
-                if correct: 
-                    if "fail" not in language_description["subgoal"][f"{keypoints[i//3]}"]:
-                        language_description["subgoal"][f"{keypoints[i//3]}"]["fail"] = {}
-                    language_description["subgoal"][f"{keypoints[i//3]}"]["fail"][f"perturb_{perturb_number}(correct)"] = correct_lang
+                    if "fail" not in language_description["subgoal"][f"{keypoints_with_init[i//3]}"]:
+                        language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["fail"] = {}
+                    language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["fail"][f"perturb_{perturb_number}"] = failure_lang
 
-                languages[i] = f"{i}. {lang}"
+                if ongoing:
+                    if "ongoing" not in language_description["subgoal"][f"{keypoints_with_init[i//3]}"]:
+                        language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["ongoing"] = {}
+                    language_description["subgoal"][f"{keypoints_with_init[i//3]}"]["ongoing"][f"perturb_{perturb_number}"] = ongoing_lang
+
                 with open(os.path.join(episode_folder, "transitions.csv"), 'w', newline='') as csvfile:
                     writer = csv.writer(csvfile)
                     for transition in transitions:
@@ -494,22 +509,22 @@ class RolloutGenerator(object):
                 # low_dim_obs = self.save_low_dim(obs_copy) -> do we need this for LLaVA training?
             else:
                 if step == 0:
-                    img_name = f"wpt0_{perturb_number}"
+                    img_name = f"0_{perturb_number}"
                 else:
                     if perturb_count <= len(perturbed_idx) - 1:
                         if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                            img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
+                            img_name = f"{keypoints_with_init[perturb_count]}_fail_perturb_{perturb_number}"
                         elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
-                            img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
+                            img_name = f"{keypoints_with_init[perturb_count]}_fail_perturb_{perturb_number}(correct)"
                             perturb_count += 1
                         else:
                             img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                            img_name = f"wpt{perturb_count}_{perturb_number}"
+                            img_name = f"{keypoints_with_init[perturb_count]}_{perturb_number}"
                     else: 
                         if not perturb:
-                            img_name = f"wpt{step}_{perturb_number}"
+                            img_name = f"{keypoints_with_init[step]}_{perturb_number}"
                         else:
-                            img_name = f"wpt{perturb_count}_{perturb_number}"
+                            img_name = f"{keypoints_with_init[perturb_count]}_{perturb_number}"
                 self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
                 low_dim_obs = self.save_low_dim(obs_copy)
                 print(f"Step {step}     | Gripper pose: {low_dim_obs.gripper_pose}")
@@ -532,13 +547,13 @@ class RolloutGenerator(object):
                 act_result = ActResult(actions[step]) # selects the ith keypoint as action
                 if perturb_count <= len(perturbed_idx) - 1:
                     if step == 2 * perturb_count + perturbed_idx[perturb_count]:
-                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (perturbed waypoint {keypoints[step - 2 * perturb_count]})")
+                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (perturbed waypoint {keypoints_with_init[step - 2 * perturb_count]})")
                     elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (corrected waypoint {keypoints[step - 2 * perturb_count - 1]} = dense waypoint idx {corrective_idx[perturb_count]})")
+                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (corrected waypoint {keypoints_with_init[step - 2 * perturb_count - 1]} = dense waypoint idx {corrective_idx[perturb_count]})")
                     else:
-                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step - 2 * perturb_count]})")
+                        print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints_with_init[step - 2 * perturb_count]})")
                 else:
-                    print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints[step - 2 * perturb_count]})")
+                    print(f"Step {step} -> {step+1}|  pred action: {np.round(act_result.action, 3)} --> (waypoint {keypoints_with_init[step - 2 * perturb_count]})")
                     
 
             # 3-2. take interactive actions
@@ -657,22 +672,22 @@ class RolloutGenerator(object):
                     self.save_rgb_and_depth_img(obs_copy, episode_folder, step)
                 else:
                     if step == 0:
-                        img_name = f"wpt0_{perturb_number}"
+                        img_name = f"0_{perturb_number}"
                     else:
                         if perturb_count <= len(perturbed_idx) - 1:
                             if step == 2 * perturb_count + perturbed_idx[perturb_count] + 1:
-                                img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}"
+                                img_name = f"{keypoints_with_init[perturb_count]}_fail_perturb_{perturb_number}"
                             elif step == 2 * perturb_count + perturbed_idx[perturb_count] + 2:
-                                img_name = f"wpt{perturb_count}_fail_perturb_{perturb_number}(correct)"
+                                img_name = f"{keypoints_with_init[perturb_count]}_fail_perturb_{perturb_number}(correct)"
                                 perturb_count += 1
                             else:
                                 img_name = f"{keypoints[step - 2 * perturb_count - 1]}"
-                                img_name = f"wpt{perturb_count}_{perturb_number}"
+                                img_name = f"{keypoints_with_init[perturb_count]}_{perturb_number}"
                         else:
                             if replay_ground_truth:
-                                img_name = f"wpt{step}_{perturb_number}"
+                                img_name = f"{keypoints_with_init[step]}_{perturb_number}"
                             else:
-                                img_name = f"wpt{perturb_count}_{perturb_number}"
+                                img_name = f"{keypoints_with_init[perturb_count]}_{perturb_number}"
                     self.save_rgb_and_depth_img(obs_copy, episode_folder, img_name)
                     low_dim_obs = self.save_low_dim(obs_copy)
                     print(f"Step {step}     | Gripper pose: {low_dim_obs.gripper_pose}")
