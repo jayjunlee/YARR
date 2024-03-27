@@ -47,6 +47,7 @@ np.set_printoptions(formatter={'float': '{:0.3f}'.format})
 TASK_BOUND = [-0.075, -0.455, 0.752, 0.480, 0.455, 1.477]
 PANDA_INIT_ACTION = np.array([2.78467745e-01, -8.16867873e-03, 1.47196412e+00, -2.93883204e-06, 9.92665470e-01, -2.89610603e-06, 1.20894387e-01, 1, 0])
 
+# default rollout generator class with some additional functions
 class RolloutGenerator(object):
 
     def __init__(self, env_device = 'cuda:0'):
@@ -428,6 +429,7 @@ class RolloutGenerator(object):
 
         return perturbed_action, intermediate_action
 
+# expert replay with optional perturbation given keypoint index (kypt idx) to perturb
 class ExpertReplay(RolloutGenerator):
 
     def __init__(self, env_device = 'cuda:0'):
@@ -456,7 +458,7 @@ class ExpertReplay(RolloutGenerator):
 
     def generator(self, env: Env, episode_length: int, log_dir, task_name, 
                   episode_number, language_description, eval_demo_seed: int = 0,
-                  record_enabled: bool = False, perturb_num: int = 0):
+                  record_enabled: bool = False, perturb_num: int = 0, skip_wypt: bool = False, num_wypt_set: set = (), skip_and_continue: bool = False):
         
         # episode save path (imgs and low dim obs)
         episode_folder = os.path.join(log_dir, task_name, str(episode_number))
@@ -465,18 +467,30 @@ class ExpertReplay(RolloutGenerator):
         obs, obs_copy = env.reset_to_demo(eval_demo_seed)
 
         # expert actions: 9D action = 7D ee pose + 1D gripper open + 1D ignore collision
-        actions, keypoints, dense_actions, waypoints = env.get_ground_truth_action(eval_demo_seed, 'heuristic', stopping_delta=0.06)            
+        actions, keypoints, dense_actions, waypoints = env.get_ground_truth_action(eval_demo_seed, 'heuristic', stopping_delta=0.1)            
         keypoints_with_init = [0] + keypoints
         actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
 
+        # Set true if we want to skip demos with same number of keypoints as before
+        if skip_wypt:
+            if len(keypoints) in num_wypt_set:
+                skip_and_continue[0] = True
+                shutil.rmtree(os.path.join(log_dir, task_name, str(episode_number)))
+                return
+            else:
+                skip_and_continue[0] = False
+                num_wypt_set.add(len(keypoints))
+
         # dict to track
-        # new or load language_description.json
+        # new or load from existing language_description.json
         if "task" not in language_description:
             language_description["task"] = env._lang_goal
         if "init" not in language_description:
             language_description["init"] = json.dumps(np.round(PANDA_INIT_ACTION,3).tolist())
         if "keypoints" not in language_description:
-            language_description["keypoints"] = str(keypoints)
+            language_description["keypoints"] = str(keypoints_with_init)
+        if "expert_keypoints_length" not in language_description:
+            language_description["expert_keypoints_length"] = str(len(keypoints_with_init))
         if "subgoal" not in language_description:
             language_description["subgoal"] = {}
 
@@ -490,12 +504,19 @@ class ExpertReplay(RolloutGenerator):
             for kp, action in zip(keypoints_with_init, actions_with_init)
         }
 
+
+        # TODO: Integrate function that takes in expert sequence of actions and outputs idx to perturb with skip_intermediate info
+        # We add our new data augmentation framework functions here.
+
+
         # init perturbation config per task or per demo episode
         perturb_config = {}
-        perturb_config = {
-            5: {'skip_intermediate': True},
-            7: {'skip_intermediate': False}
-        }
+
+        # Example perturb_config
+        # perturb_config = {
+        #     5: {'skip_intermediate': True},
+        #     7: {'skip_intermediate': False}
+        # }
 
         # keypoints to perturb (probs as idx of keypoints assuming there are equal num of keypoints across demos per task)
         step = 0
@@ -532,23 +553,10 @@ class ExpertReplay(RolloutGenerator):
 
                 # unique identifier for saving imgs at each timestep
                 # expert -> perturb -> intermediate -> expert -> perturb & skip intermediate -> expert
-                keypoint_state = f"{curr_kypt}_{action_dict['type']}"
-                # if action_dict['type'] == 'expert':
-                #     # if curr_kypt_idx in perturb_config:
-                #     #     if perturb_config[curr_kypt_idx]['skip_intermediate']:
-                #     #         keypoint_state = f"{curr_kypt}_perturb_{perturb_num}(correct)"
-                #     # else:
-                #     keypoint_state = f"{curr_kypt}_{perturb_num}"
-                #     print('expert')
-                # elif action_dict['type'] == 'perturb':
-                #     keypoint_state = f"{curr_kypt}_perturb_{perturb_num}"
-                #     print('perturb')
-                # elif action_dict['type'] == 'intermediate':
-                #     keypoint_state = f"{curr_kypt}_perturb_{perturb_num}(correct)"
-                #     print('inter')
-                
+                keypoint_state = f"{curr_kypt}_{action_dict['type']}"                
                 print(f"Step {step} -> {step+1}|  Action: {np.round(act_result.action, 3)} --> (keypoint {keypoint_state})")
                 
+                # annotate each step of action transition
                 self.update_subgoal_language_description(language_description, curr_kypt, perturb_num, action_dict, act, curr_kypt_idx, perturb_config, prev_kypt)
 
                 # handling timeout and terminal condition
