@@ -36,6 +36,9 @@ from scipy.spatial.transform import Rotation
 from rlbench.backend import utils
 from rlbench.backend.const import *
 
+from rvt.data_aug.base import Action, WayPoint, Episode, DataAugmentor
+from rvt.data_aug.heuristic import Heuristic
+
 logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.WARNING)
 
@@ -460,6 +463,28 @@ class ExpertReplay(RolloutGenerator):
             language_description["subgoal"][f"{curr_kypt}"]["ongoing"][f"perturb_{perturb_num}"].setdefault("lang", json.dumps(transition_lang))
             language_description["subgoal"][f"{curr_kypt}"]["ongoing"][f"perturb_{perturb_num}"].setdefault("action", json.dumps(np.round(act[curr_kypt]['expert_action']['action'],3).tolist()))
 
+    def create_episode(self, dense_actions, dense_action_indices, keypoint_actions, keypoint_action_indices):
+        episode = Episode([])
+
+        for i, action in enumerate(dense_actions):
+            if i in keypoint_action_indices:
+                waypoint_type = 'keypoint'
+                a = keypoint_action_indices.index(i)
+                action = keypoint_actions[keypoint_action_indices.index(i)]
+            else:
+                waypoint_type = 'intermediate'
+                action = dense_actions[dense_action_indices.index(i)]
+
+            translation = action[:3]
+            rotation = action[3:7]
+            gripper_open = bool(action[7])
+            ignore_collision = bool(action[8])
+
+            waypoint = WayPoint(i, waypoint_type, Action(translation, rotation, gripper_open, ignore_collision))
+            episode.waypoints.append(waypoint)
+
+        return episode
+
     def generator(self, env: Env, episode_length: int, log_dir, task_name, 
                   episode_number, language_description, eval_demo_seed: int = 0,
                   record_enabled: bool = False, perturb_num: int = 0, skip_wypt: bool = False, num_wypt_set: set = (), skip_and_continue: bool = False):
@@ -471,10 +496,14 @@ class ExpertReplay(RolloutGenerator):
         obs, obs_copy = env.reset_to_demo(eval_demo_seed)
 
         # expert actions: 9D action = 7D ee pose + 1D gripper open + 1D ignore collision
-        
         kypt_actions, kypt_idx, dense_actions, dense_idx = env.get_ground_truth_action(eval_demo_seed, 'heuristic', stopping_delta=0.1)            
-        keypoints_with_init = [0] + kypt_idx
-        actions_with_init = np.vstack([PANDA_INIT_ACTION, kypt_actions])
+        # dense actions already include the init pose of the robot
+        kypt_idx_w_init = [0] + kypt_idx
+        kypt_actions_w_init = np.vstack([PANDA_INIT_ACTION, kypt_actions])
+
+        episode = self.create_episode(dense_actions, dense_idx.tolist(), kypt_actions_w_init, kypt_idx_w_init)
+        heuristic_data_augmenter = Heuristic(task_name)
+        perturbed_episode = heuristic_data_augmenter.heuristic_perturb(episode, N=1)
 
         # Set true if we want to skip demos with same number of keypoints as before
         if skip_wypt:
@@ -493,76 +522,49 @@ class ExpertReplay(RolloutGenerator):
         if "init" not in language_description:
             language_description["init"] = json.dumps(np.round(PANDA_INIT_ACTION,3).tolist())
         if "keypoints" not in language_description:
-            language_description["keypoints"] = str(keypoints_with_init)
+            language_description["keypoints"] = str(kypt_idx_w_init)
         if "expert_keypoints_length" not in language_description:
-            language_description["expert_keypoints_length"] = str(len(keypoints_with_init))
+            language_description["expert_keypoints_length"] = str(len(kypt_idx_w_init))
         if "subgoal" not in language_description:
             language_description["subgoal"] = {}
-
-        # init modifiable action dict with expert actions
-        act = {
-            kp: {
-                'expert_action': {'action': action, 'type': 'expert'},
-                'perturb_action': {'action': '', 'type': 'perturb'},
-                'intermediate_action': {'action': '', 'type': 'intermediate'}
-            }
-            for kp, action in zip(keypoints_with_init, actions_with_init)
-        }
-
-
-        # TODO: Integrate function that takes in expert sequence of actions and outputs idx to perturb with skip_intermediate info
-        # We add our new data augmentation framework functions here.
-
-
-        # init perturbation config per task or per demo episode
-        perturb_config = {}
-
-        # Example perturb_config
-        # perturb_config = {
-        #     5: {'skip_intermediate': True},
-        #     7: {'skip_intermediate': False}
-        # }
-
-        # keypoints to perturb (probs as idx of keypoints assuming there are equal num of keypoints across demos per task)
+        
+        kypt_perturb, _ = perturbed_episode.return_()
         step = 0
-        for curr_kypt_idx, curr_kypt in enumerate(keypoints_with_init):
-            # init per keypoint
-            actions_to_execute = [act[curr_kypt]['expert_action']]
-            language_description["subgoal"].setdefault(f"{curr_kypt}", {})
-            language_description["subgoal"][f"{curr_kypt}"]["label"] = "start" if curr_kypt == 0 else "success"
-            prev_kypt = keypoints_with_init[curr_kypt_idx - 1] if curr_kypt_idx > 1 else None
-            next_kypt = keypoints_with_init[curr_kypt_idx + 1] if curr_kypt_idx < len(keypoints_with_init) - 1 else None
+        for curr_kypt_idx, curr_kypt in enumerate(kypt_perturb):
+            # we will loop through this action_buffer later
+            action_buffer = []
 
-            if curr_kypt_idx < len(keypoints_with_init) - 1:
-                language_description["subgoal"][f"{curr_kypt}"]["lang"] = json.dumps(super().annotate_transition(act[curr_kypt]['expert_action']['action'], act[next_kypt]['expert_action']['action']))
-                language_description["subgoal"][f"{curr_kypt}"]["action"] = json.dumps(np.round(act[next_kypt]['expert_action']['action'],3).tolist())
+            language_description["subgoal"].setdefault(f"{curr_kypt.id}", {})
+            language_description["subgoal"][f"{curr_kypt.id}"]["label"] = "start" if curr_kypt.id == 0 else "success"
+            prev_kypt = kypt_perturb[curr_kypt_idx - 1] if curr_kypt_idx > 1 else None
+            next_kypt = kypt_perturb[curr_kypt_idx + 1] if curr_kypt_idx < len(kypt_perturb) - 1 else None
 
-            # check if current keypoint is to be perturbed
-            if curr_kypt_idx in perturb_config:
-                perturb_action, intermediate_action = super().perturb_keypoint(curr_kypt_idx, keypoints_with_init, actions_with_init, dense_actions, dense_idx, perturb_config[curr_kypt_idx]['skip_intermediate'])
-                language_description["subgoal"][f"{curr_kypt}"].setdefault("fail", {})
-                act[curr_kypt]['perturb_action'] = {'action': perturb_action, 'type': 'perturb'}
-                actions_to_execute.insert(0, act[curr_kypt]['perturb_action'])
+            if curr_kypt_idx < len(kypt_idx_w_init) - 1:
+                language_description["subgoal"][f"{curr_kypt.id}"]["lang"] = json.dumps(super().annotate_transition(curr_kypt.action.action_to_array(), next_kypt.action.action_to_array()))
+                language_description["subgoal"][f"{curr_kypt.id}"]["action"] = json.dumps(np.round(next_kypt.action.action_to_array(), 3).tolist())
 
-                if not perturb_config[curr_kypt_idx]['skip_intermediate']:
-                    language_description["subgoal"][f"{curr_kypt}"].setdefault("ongoing", {})
-                    act[curr_kypt]['intermediate_action'] = {'action': intermediate_action, 'type': 'intermediate'}
-                    actions_to_execute.insert(1, act[curr_kypt]['intermediate_action'])
 
-            # execute action buffer (expert or perturb+expert or perturb+intermediate+expert)
-            for i, action_dict in enumerate(actions_to_execute):
-
+            if curr_kypt.perturbations:
+                perturbation = curr_kypt.perturbations[episode_number]
+                action_buffer.append({'action': perturbation.mistake.action.action_to_array(), 'type': 'perturb'}) # perturbing action
+                language_description["subgoal"][f"{curr_kypt.id}"].setdefault("fail", {})
+                if perturbation.correction is not None:
+                    action_buffer.append({'action': perturbation.correction.action.action_to_array(), 'type': 'intermediate'}) # optional correcting action
+                    language_description["subgoal"][f"{curr_kypt.id}"].setdefault("ongoing", {})
+            action_buffer.append({'action': curr_kypt.action.action_to_array(), 'type': 'expert'}) # expert action after optional perturbations to the same kypt
+            
+            for action_dict in action_buffer:
                 # Step through environment
                 act_result = ActResult(action_dict['action'])
                 transition, obs_copy = env.step(act_result)
 
                 # unique identifier for saving imgs at each timestep
                 # expert -> perturb -> intermediate -> expert -> perturb & skip intermediate -> expert
-                keypoint_state = f"{curr_kypt}_{action_dict['type']}"                
+                keypoint_state = f"{curr_kypt.id}_{action_dict['type']}"                
                 print(f"Step {step} -> {step+1}|  Action: {np.round(act_result.action, 3)} --> (keypoint {keypoint_state})")
                 
                 # annotate each step of action transition
-                self.update_subgoal_language_description(language_description, curr_kypt, perturb_num, action_dict, act, curr_kypt_idx, perturb_config, prev_kypt)
+                # self.update_subgoal_language_description(language_description, curr_kypt.id, perturb_num, action_dict, act, curr_kypt_idx, perturb_config, prev_kypt)
 
                 # handling timeout and terminal condition
                 obs_tp1 = dict(transition.observation)
@@ -593,12 +595,12 @@ class ExpertReplay(RolloutGenerator):
                 super().save_low_dim(obs_copy, episode_folder, keypoint_state)
                 step += 1
 
-            if curr_kypt_idx == len(keypoints_with_init) - 1:
+            if curr_kypt_idx == len(kypt_idx_w_init) - 1:
                 def numpy_encoder(obj):
                     if isinstance(obj, np.ndarray):
                         return obj.tolist()  # Convert NumPy array to list
                     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-                json_data = json.dumps(act, default=numpy_encoder, indent=4)
+                json_data = json.dumps(action_buffer, default=numpy_encoder, indent=4)
                 with open(os.path.join(episode_folder, "action.json"), "w") as file:
                     file.write(json_data)
 
