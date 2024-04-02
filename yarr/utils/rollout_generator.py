@@ -42,7 +42,9 @@ logging.basicConfig(level=logging.WARNING)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning) 
 
-np.set_printoptions(formatter={'float': '{:0.3f}'.format})
+# np.set_printoptions(formatter={'float': '{:0.3f}'.format})
+np.set_printoptions(precision=5, suppress=True, linewidth=np.inf)
+
 
 TASK_BOUND = [-0.075, -0.455, 0.752, 0.480, 0.455, 1.477]
 PANDA_INIT_ACTION = np.array([2.78467745e-01, -8.16867873e-03, 1.47196412e+00, -2.93883204e-06, 9.92665470e-01, -2.89610603e-06, 1.20894387e-01, 1, 0])
@@ -179,6 +181,8 @@ class RolloutGenerator(object):
         wrist_depth.save(os.path.join(wrist_depth_path, f"{keypoint_state}.png"))
         front_rgb.save(os.path.join(front_rgb_path, f"{keypoint_state}.png"))
         front_depth.save(os.path.join(front_depth_path, f"{keypoint_state}.png"))
+
+        front_rgb.save(os.path.join(front_rgb_path, f"current.png"))
 
     def save_low_dim(self, obs, save_path, keypoint_state):
         if obs is None:
@@ -467,19 +471,20 @@ class ExpertReplay(RolloutGenerator):
         obs, obs_copy = env.reset_to_demo(eval_demo_seed)
 
         # expert actions: 9D action = 7D ee pose + 1D gripper open + 1D ignore collision
-        actions, keypoints, dense_actions, waypoints = env.get_ground_truth_action(eval_demo_seed, 'heuristic', stopping_delta=0.1)            
-        keypoints_with_init = [0] + keypoints
-        actions_with_init = np.vstack([PANDA_INIT_ACTION, actions])
+        
+        kypt_actions, kypt_idx, dense_actions, dense_idx = env.get_ground_truth_action(eval_demo_seed, 'heuristic', stopping_delta=0.1)            
+        keypoints_with_init = [0] + kypt_idx
+        actions_with_init = np.vstack([PANDA_INIT_ACTION, kypt_actions])
 
         # Set true if we want to skip demos with same number of keypoints as before
         if skip_wypt:
-            if len(keypoints) in num_wypt_set:
+            if len(kypt_idx) in num_wypt_set:
                 skip_and_continue[0] = True
                 shutil.rmtree(os.path.join(log_dir, task_name, str(episode_number)))
                 return
             else:
                 skip_and_continue[0] = False
-                num_wypt_set.add(len(keypoints))
+                num_wypt_set.add(len(kypt_idx))
 
         # dict to track
         # new or load from existing language_description.json
@@ -534,7 +539,7 @@ class ExpertReplay(RolloutGenerator):
 
             # check if current keypoint is to be perturbed
             if curr_kypt_idx in perturb_config:
-                perturb_action, intermediate_action = super().perturb_keypoint(curr_kypt_idx, keypoints_with_init, actions_with_init, dense_actions, waypoints, perturb_config[curr_kypt_idx]['skip_intermediate'])
+                perturb_action, intermediate_action = super().perturb_keypoint(curr_kypt_idx, keypoints_with_init, actions_with_init, dense_actions, dense_idx, perturb_config[curr_kypt_idx]['skip_intermediate'])
                 language_description["subgoal"][f"{curr_kypt}"].setdefault("fail", {})
                 act[curr_kypt]['perturb_action'] = {'action': perturb_action, 'type': 'perturb'}
                 actions_to_execute.insert(0, act[curr_kypt]['perturb_action'])
@@ -600,3 +605,101 @@ class ExpertReplay(RolloutGenerator):
             if transition.info.get("needs_reset", transition.terminal):
                 print()
                 return
+            
+
+class InteractiveRollout(RolloutGenerator):
+    def __init__(self, env_device = 'cuda:0'):
+        super().__init__(env_device)
+
+    def get_user_input_action(self):
+        user_action_str = input("Enter proposed action:")
+        user_action = np.array([float(item) for item in user_action_str.split()])
+        return user_action
+
+    def generator(self, env: Env, episode_length: int, log_dir, task_name, 
+                    episode_number, eval_demo_seed: int = 0,
+                    record_enabled: bool = False, interactive: bool = True):
+            
+            # episode save path (imgs and low dim obs)
+            episode_folder = os.path.join(log_dir, task_name, str(episode_number))
+
+            # reset
+            obs, obs_copy = env.reset_to_demo(eval_demo_seed)
+
+            # expert actions: 9D action = 7D ee pose + 1D gripper open + 1D ignore collision
+            kypt_actions, kypt_idx, dense_actions, dense_idx = env.get_ground_truth_action(eval_demo_seed, 'heuristic', stopping_delta=0.1)            
+            kypt_idx_with_init = [0] + kypt_idx
+            kypt_actions_with_init = np.vstack([PANDA_INIT_ACTION, kypt_actions])
+
+
+            # init modifiable action dict with expert actions
+            act = {
+                kp: {
+                    'expert_action': {'action': action, 'type': 'expert'},
+                    'perturb_action': {'action': '', 'type': 'perturb'},
+                    'intermediate_action': {'action': '', 'type': 'intermediate'}
+                }
+                for kp, action in zip(kypt_idx_with_init, kypt_actions_with_init)
+            }
+
+            # keypoints to perturb (probs as idx of keypoints assuming there are equal num of keypoints across demos per task)
+            step = 0
+            for curr_kypt_idx, curr_kypt in enumerate(kypt_idx_with_init):
+                # init per keypoint
+                actions_to_execute = [act[curr_kypt]['expert_action']]
+
+                # execute action buffer (expert or perturb+expert or perturb+intermediate+expert)
+                for i, action_dict in enumerate(actions_to_execute):
+
+                    # Step through environment
+                    act_result = ActResult(action_dict['action'])
+                    print(f"Step {step} | Original expert action: {np.array2string(act_result.action, max_line_width=np.inf)}")
+                    if interactive:
+                        act_result.action = self.get_user_input_action()
+
+                    print(f"Step {step} | User input action: {np.round(act_result.action, 3)}")
+
+                    transition, obs_copy = env.step(act_result)
+
+                    # handling timeout and terminal condition
+                    obs_tp1 = dict(transition.observation)
+                    timeout = False
+                    if step == episode_length - 1:
+                        # If last transition, and not terminal, then we timed out
+                        timeout = not transition.terminal
+                        if timeout:
+                            transition.terminal = True
+                            if "needs_reset" in transition.info:
+                                transition.info["needs_reset"] = True
+
+                    transition.info["active_task_id"] = env.active_task_id
+
+                    replay_transition = ReplayTransition({}, act_result.action, transition.reward,
+                        transition.terminal, timeout, summaries=transition.summaries, info=transition.info)
+
+                    if transition.terminal or timeout:
+                        replay_transition.final_observation = obs_tp1
+
+                    if record_enabled and transition.terminal or timeout or step == episode_length - 1:
+                        env.env._action_mode.arm_action_mode.record_end(env.env._scene, steps=60, step_scene=True)
+
+                    yield replay_transition
+
+                    # save imgs and low dim obs
+                    keypoint_state = f"{curr_kypt}_{action_dict['type']}" 
+                    super().save_rgb_and_depth_img(obs_copy, episode_folder, keypoint_state)
+                    super().save_low_dim(obs_copy, episode_folder, keypoint_state)
+                    step += 1
+
+                if curr_kypt_idx == len(kypt_idx_with_init) - 1:
+                    def numpy_encoder(obj):
+                        if isinstance(obj, np.ndarray):
+                            return obj.tolist()  # Convert NumPy array to list
+                        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+                    json_data = json.dumps(act, default=numpy_encoder, indent=4)
+                    with open(os.path.join(episode_folder, "action.json"), "w") as file:
+                        file.write(json_data)
+
+                if transition.info.get("needs_reset", transition.terminal):
+                    print()
+                    return
