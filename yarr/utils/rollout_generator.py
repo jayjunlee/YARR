@@ -37,7 +37,7 @@ from rlbench.backend import utils
 from rlbench.backend.const import *
 
 from rvt.data_aug.base import Action, WayPoint, Episode, DataAugmentor
-from rvt.data_aug.heuristic import Heuristic
+from rvt.data_aug.heuristic_augmentor import Heuristic
 
 logging.getLogger('PIL').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.WARNING)
@@ -651,8 +651,10 @@ class InteractiveRollout(RolloutGenerator):
                 actions_to_execute = [act[curr_kypt]['expert_action']]
 
                 # execute action buffer (expert or perturb+expert or perturb+intermediate+expert)
-                for i, action_dict in enumerate(actions_to_execute):
-
+                # for i, action_dict in enumerate(actions_to_execute):
+                while True:
+                    i = 0
+                    action_dict = actions_to_execute[i]
                     # Step through environment
                     act_result = ActResult(action_dict['action'])
                     print(f"Step {step} | Original expert action: {np.array2string(act_result.action, max_line_width=np.inf)}")
