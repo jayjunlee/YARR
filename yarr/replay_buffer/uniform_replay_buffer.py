@@ -767,85 +767,85 @@ class UniformReplayBuffer(ReplayBuffer):
 
         if batch_size is None:
             batch_size = self._batch_size
-        with self._lock:
-            if indices is None:
-                indices = self.sample_index_batch(batch_size, distribution_mode)
-            assert len(indices) == batch_size
+        # with self._lock:
+        if indices is None:
+            indices = self.sample_index_batch(batch_size, distribution_mode)
+        assert len(indices) == batch_size
 
-            transition_elements = self.get_transition_elements(batch_size)
-            batch_arrays = self._create_batch_arrays(batch_size)
-            task_name_arrays = []
+        transition_elements = self.get_transition_elements(batch_size)
+        batch_arrays = self._create_batch_arrays(batch_size)
+        task_name_arrays = []
 
-            for batch_element, state_index in enumerate(indices):
+        for batch_element, state_index in enumerate(indices):
 
-                if not self.is_valid_transition(state_index):
-                    raise ValueError('Invalid index %d.' % state_index)
+            if not self.is_valid_transition(state_index):
+                raise ValueError('Invalid index %d.' % state_index)
 
-                task_name_arrays.append(self._task_names[self._index_mapping[state_index, 0]])
+            task_name_arrays.append(self._task_names[self._index_mapping[state_index, 0]])
 
-                trajectory_indices = [(state_index + j) % self._replay_capacity
-                                      for j in range(self._update_horizon)]
-                trajectory_terminals = self._store['terminal'][
-                    trajectory_indices]
-                is_terminal_transition = trajectory_terminals.any()
-                if not is_terminal_transition:
-                    trajectory_length = self._update_horizon
-                else:
-                    # np.argmax of a bool array returns index of the first True.
-                    trajectory_length = np.argmax(
-                        trajectory_terminals.astype(np.bool),
-                        0) + 1
+            trajectory_indices = [(state_index + j) % self._replay_capacity
+                                    for j in range(self._update_horizon)]
+            trajectory_terminals = self._store['terminal'][
+                trajectory_indices]
+            is_terminal_transition = trajectory_terminals.any()
+            if not is_terminal_transition:
+                trajectory_length = self._update_horizon
+            else:
+                # np.argmax of a bool array returns index of the first True.
+                trajectory_length = np.argmax(
+                    trajectory_terminals.astype(np.bool),
+                    0) + 1
 
-                next_state_index = state_index + trajectory_length
+            next_state_index = state_index + trajectory_length
 
-                store = self._store
-                if self._disk_saving:
-                    store = self._get_from_disk(
-                        state_index - (self._timesteps - 1),
-                        next_state_index + 1)
+            store = self._store
+            if self._disk_saving:
+                store = self._get_from_disk(
+                    state_index - (self._timesteps - 1),
+                    next_state_index + 1)
 
-                trajectory_discount_vector = (
-                    self._cumulative_discount_vector[:trajectory_length])
-                trajectory_rewards = self.get_range(store['reward'],
-                                                    state_index,
-                                                    next_state_index)
+            trajectory_discount_vector = (
+                self._cumulative_discount_vector[:trajectory_length])
+            trajectory_rewards = self.get_range(store['reward'],
+                                                state_index,
+                                                next_state_index)
 
-                terminal_stack = self.get_terminal_stack(state_index)
-                terminal_stack_tp1 = self.get_terminal_stack(
-                    next_state_index % self._replay_capacity)
+            terminal_stack = self.get_terminal_stack(state_index)
+            terminal_stack_tp1 = self.get_terminal_stack(
+                next_state_index % self._replay_capacity)
 
-                # Fill the contents of each array in the sampled batch.
-                assert len(transition_elements) == len(batch_arrays)
-                for element_array, element in zip(batch_arrays,
-                                                  transition_elements):
-                    if element.is_observation:
-                        if element.name.endswith('tp1'):
-                            element_array[
-                                batch_element] = self._get_element_stack(
-                                store[element.name[:-4]],
-                                next_state_index % self._replay_capacity,
-                                terminal_stack_tp1)
-                        else:
-                            element_array[
-                                batch_element] = self._get_element_stack(
-                                store[element.name],
-                                state_index, terminal_stack)
-                    elif element.name == REWARD:
-                        # compute discounted sum of rewards in the trajectory.
-                        element_array[batch_element] = np.sum(
-                            trajectory_discount_vector * trajectory_rewards,
-                            axis=0)
-                    elif element.name == TERMINAL:
-                        element_array[batch_element] = is_terminal_transition
-                    elif element.name == INDICES:
-                        element_array[batch_element] = state_index
-                    elif element.name in store.keys():
-                        try:
-                            element_array[batch_element] = (
-                                store[element.name][state_index])
-                        except:
-                            import IPython
-                            IPython.embed()
+            # Fill the contents of each array in the sampled batch.
+            assert len(transition_elements) == len(batch_arrays)
+            for element_array, element in zip(batch_arrays,
+                                                transition_elements):
+                if element.is_observation:
+                    if element.name.endswith('tp1'):
+                        element_array[
+                            batch_element] = self._get_element_stack(
+                            store[element.name[:-4]],
+                            next_state_index % self._replay_capacity,
+                            terminal_stack_tp1)
+                    else:
+                        element_array[
+                            batch_element] = self._get_element_stack(
+                            store[element.name],
+                            state_index, terminal_stack)
+                elif element.name == REWARD:
+                    # compute discounted sum of rewards in the trajectory.
+                    element_array[batch_element] = np.sum(
+                        trajectory_discount_vector * trajectory_rewards,
+                        axis=0)
+                elif element.name == TERMINAL:
+                    element_array[batch_element] = is_terminal_transition
+                elif element.name == INDICES:
+                    element_array[batch_element] = state_index
+                elif element.name in store.keys():
+                    try:
+                        element_array[batch_element] = (
+                            store[element.name][state_index])
+                    except:
+                        import IPython
+                        IPython.embed()
 
         if pack_in_dict:
             batch_arrays = self.unpack_transition(
